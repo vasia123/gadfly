@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/vasis/projects_hobby/gadfly/.venv/bin/python -m gadfly.hook"
+          }
+        ]
+      }
+    ]
+  }
+}
