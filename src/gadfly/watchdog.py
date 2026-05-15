@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
+    ThinkingConfigDisabled,
     create_sdk_mcp_server,
     query,
     tool,
@@ -49,7 +50,9 @@ from .verdict import Verdict
 
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_TIMEOUT_S = 60.0  # CLI cold start ~10s first time, ~2-3s warm; Haiku adds 1-3s
-DEFAULT_MAX_TURNS = 2
+DEFAULT_MAX_TURNS = 2  # turn 1: submit_verdict tool_use; turn 2: Haiku must
+# close out after receiving the tool_result. max_turns=1 trips
+# "Reached maximum number of turns" — empirically verified.
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,22 @@ def _build_options(captured: _Captured, model: str) -> ClaudeAgentOptions:
         allowed_tools=["mcp__gadfly__submit_verdict"],
         permission_mode="bypassPermissions",
         setting_sources=[],
+        # CRITICAL recursion guard: pass an EMPTY settings object via
+        # `--settings '{}'`. Without this the inner CLI inherits hooks from
+        # the user's ~/.claude/settings.json (cc-telegram-notify Stop /
+        # Notification, our own gadfly hook, etc.) and fires phantom
+        # notifications when its own turn ends. The `hooks={}` option in
+        # ClaudeAgentOptions sounds like the right knob but it is for SDK-
+        # internal Python hook callbacks; subprocess_cli.py does NOT
+        # translate it to a CLI flag. Verified by reading SDK source.
+        settings="{}",
+        # Extended thinking is wasted latency for one-shot classification
+        # with a forced tool call — disable it explicitly. CAUTION:
+        # `ThinkingConfigDisabled` is a TypedDict, not a dataclass, so
+        # calling it with no arguments silently produces `{}` and the SDK
+        # then explodes with `KeyError('type')`. The `type=` kwarg below
+        # is mandatory. Covered by tests/test_live.py::test_evaluate_*.
+        thinking=ThinkingConfigDisabled(type="disabled"),
         max_turns=DEFAULT_MAX_TURNS,
         env={"GADFLY_INTERNAL": "1"},
     )
@@ -122,9 +141,10 @@ async def evaluate_async(
         tool_name=tool_name,
         tool_input=tool_input,
         tool_response=tool_response,
-        last_user_request=context.last_user_request,
+        recent_user_requests=context.recent_user_requests,
         last_assistant_plan=context.last_assistant_plan,
         recent_actions=context.recent_actions,
+        distilled_goal=context.distilled_goal,
     )
     system_prompt_sha = audit_log.ensure_system_prompt(SYSTEM_PROMPT)
 

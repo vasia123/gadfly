@@ -92,6 +92,29 @@ def _get_text(url: str) -> tuple[int, str]:
         return code, ""
 
 
+def test_api_sessions_counts_verdicts_and_goal_events_separately(tmp_log_dir: Path, viewer_server: str):
+    """Goal-distill records share the JSONL file with verdicts but must NOT
+    inflate the verdict count or the flagged count."""
+    _seed(
+        tmp_log_dir,
+        "mixed",
+        [
+            {"type": "verdict", "ts": 1.0, "tool_name": "Edit", "verdict": {"professional": True}},
+            {"type": "goal_distill", "ts": 2.0, "goal": "first goal", "prior_goal": None},
+            {"type": "verdict", "ts": 3.0, "tool_name": "Bash", "verdict": {"professional": False}},
+            {"type": "goal_distill", "ts": 4.0, "goal": "updated", "prior_goal": "first goal"},
+            {"type": "goal_distill", "ts": 5.0, "goal": None, "error": "timeout"},
+        ],
+    )
+    data = _get_json(viewer_server + "/api/sessions")
+    s = next(s for s in data if s["id"] == "mixed")
+    assert s["count"] == 2
+    assert s["flagged"] == 1
+    assert s["goal_events"] == 3
+    # The most-recent record was a goal event — last_tool reflects that.
+    assert s["last_tool"] == "goal"
+
+
 def test_api_sessions_lists_files_with_summary(tmp_log_dir: Path, viewer_server: str):
     _seed(
         tmp_log_dir,
@@ -119,19 +142,40 @@ def test_api_sessions_lists_files_with_summary(tmp_log_dir: Path, viewer_server:
     assert data[0]["id"] == "beta"
 
 
-def test_api_session_returns_records_in_order(tmp_log_dir: Path, viewer_server: str):
+def test_api_session_returns_total_and_records_in_order(tmp_log_dir: Path, viewer_server: str):
     recs = [
         {"ts": 1.0, "tool_name": "Edit", "verdict": {"professional": True}},
         {"ts": 2.0, "tool_name": "Bash", "verdict": {"professional": True}},
     ]
     _seed(tmp_log_dir, "gamma", recs)
     data = _get_json(viewer_server + "/api/session/gamma")
-    assert [r["tool_name"] for r in data] == ["Edit", "Bash"]
+    assert data["total"] == 2
+    assert [r["tool_name"] for r in data["records"]] == ["Edit", "Bash"]
 
 
-def test_api_session_unknown_returns_empty_list(viewer_server: str):
+def test_api_session_paginates_with_limit(tmp_log_dir: Path, viewer_server: str):
+    """`?limit=N` must return the N MOST RECENT records (tail of the file),
+    not the first N — newest belongs on top of the viewer."""
+    recs = [
+        {"ts": float(i), "tool_name": f"T{i}", "verdict": {"professional": True}}
+        for i in range(10)
+    ]
+    _seed(tmp_log_dir, "page", recs)
+    data = _get_json(viewer_server + "/api/session/page?limit=3")
+    assert data["total"] == 10
+    assert [r["tool_name"] for r in data["records"]] == ["T7", "T8", "T9"]
+
+
+def test_api_session_limit_zero_returns_empty(tmp_log_dir: Path, viewer_server: str):
+    _seed(tmp_log_dir, "z", [{"ts": 1.0, "tool_name": "X", "verdict": {"professional": True}}])
+    data = _get_json(viewer_server + "/api/session/z?limit=0")
+    assert data["total"] == 1
+    assert data["records"] == []
+
+
+def test_api_session_unknown_returns_empty(viewer_server: str):
     data = _get_json(viewer_server + "/api/session/does-not-exist")
-    assert data == []
+    assert data == {"total": 0, "records": []}
 
 
 def test_api_system_prompt_roundtrip(tmp_log_dir: Path, viewer_server: str):

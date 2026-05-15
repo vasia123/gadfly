@@ -107,7 +107,7 @@ def test_happy_path_professional_false(captured_ref):
         tool_name="Edit",
         tool_input={"file_path": "x.py", "old_string": "a", "new_string": "TODO"},
         tool_response={"success": True},
-        context=SessionContext(last_user_request="implement validate_token"),
+        context=SessionContext(recent_user_requests=["implement validate_token"]),
         run_query=runner,
     )
     assert res.error is None
@@ -193,6 +193,11 @@ def test_options_block_recursion(captured_ref):
     )
     opts = captured_options["opts"]
     assert opts.setting_sources == []
+    # The actual recursion guard: --settings '{}' on the inner CLI
+    # overrides whatever hooks would otherwise be inherited from
+    # ~/.claude/settings.json. The SDK's `hooks` option is a no-op for
+    # this — verified by reading subprocess_cli.py source.
+    assert opts.settings == "{}"
     assert opts.env.get("GADFLY_INTERNAL") == "1"
     assert opts.permission_mode == "bypassPermissions"
     assert opts.allowed_tools == ["mcp__gadfly__submit_verdict"]

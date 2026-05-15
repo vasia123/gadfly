@@ -27,3 +27,9 @@ packages = ["src/gadfly"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# `live` tests spawn the real Claude Code CLI and bill against the user's
+# subscription — gated behind `GADFLY_LIVE=1` so a routine pytest run does
+# not surprise-cost the user. Run with: `GADFLY_LIVE=1 pytest -m live`.
+markers = [
+    "live: hits the real Anthropic Haiku via claude-agent-sdk; off by default",
+]

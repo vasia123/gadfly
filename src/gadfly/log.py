@@ -107,12 +107,13 @@ def append(
     user_message: str | None = None,
     system_prompt_sha: str | None = None,
 ) -> None:
-    """Append one record. Never raises — logging failure must not break the hook."""
+    """Append one verdict record. Never raises — logging failure must not break the hook."""
     try:
         root = _root()
         root.mkdir(parents=True, exist_ok=True)
         path = root / f"{session_id or 'unknown'}.jsonl"
         record = {
+            "type": "verdict",
             "ts": time.time(),
             "tool_name": tool_name,
             "tool_input_digest": _digest_tool_input(tool_name, tool_input),
@@ -127,4 +128,41 @@ def append(
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         # Logging is best-effort. Swallow.
+        pass
+
+
+def append_goal_event(
+    *,
+    session_id: str,
+    pairs_total: int,
+    pairs_new: int,
+    pairs_cached: int,
+    prior_goal: str | None,
+    goal: str | None,
+    latency_ms: float | None,
+    error: str | None,
+    cache_hit: bool,
+) -> None:
+    """Append one goal-distillation event so the viewer can show when/why
+    the session goal changed. Same file as verdict records; differentiated
+    by `type`."""
+    try:
+        root = _root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{session_id or 'unknown'}.jsonl"
+        record = {
+            "type": "goal_distill",
+            "ts": time.time(),
+            "pairs_total": pairs_total,
+            "pairs_new": pairs_new,
+            "pairs_cached": pairs_cached,
+            "prior_goal": prior_goal,
+            "goal": goal,
+            "latency_ms": latency_ms,
+            "error": error,
+            "cache_hit": cache_hit,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
         pass

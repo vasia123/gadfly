@@ -12,13 +12,15 @@ def _write_jsonl(path: Path, entries: list[dict]) -> None:
 
 def test_load_returns_empty_when_no_path():
     ctx = session.load(None)
-    assert ctx.last_user_request is None
+    assert ctx.recent_user_requests == []
+    assert ctx.last_user_request is None  # convenience accessor stays
     assert ctx.last_assistant_plan is None
     assert ctx.recent_actions == []
 
 
 def test_load_returns_empty_when_file_missing(tmp_path: Path):
     ctx = session.load(str(tmp_path / "nope.jsonl"))
+    assert ctx.recent_user_requests == []
     assert ctx.last_user_request is None
 
 
@@ -55,6 +57,7 @@ def test_load_extracts_user_assistant_and_actions(tmp_path: Path):
         ],
     )
     ctx = session.load(str(p))
+    assert ctx.recent_user_requests == ["fix the auth bug"]
     assert ctx.last_user_request == "fix the auth bug"
     assert ctx.last_assistant_plan == "now running tests"
     # Both tool_uses present, in chronological order.
@@ -79,8 +82,75 @@ def test_load_skips_pure_tool_result_user_messages(tmp_path: Path):
         ],
     )
     ctx = session.load(str(p))
-    # The pure tool_result user-message must not become last_user_request.
-    assert ctx.last_user_request == "implement feature X"
+    # The pure tool_result user-message must not be collected.
+    assert ctx.recent_user_requests == ["implement feature X"]
+
+
+def test_recent_user_requests_collects_multiple_oldest_first(tmp_path: Path):
+    """The latest user message alone often misrepresents the goal — it's a
+    clarification. Watchdog needs the trail to understand direction.
+    """
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {"message": {"role": "user", "content": "build a benchmark plan"}},
+            {"message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+            {"message": {"role": "user", "content": [{"type": "tool_result", "content": "..."}]}},
+            {"message": {"role": "user", "content": "focus on regression detection first"}},
+            {"message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
+            {"message": {"role": "user", "content": "actually use criterion not bench harness"}},
+        ],
+    )
+    ctx = session.load(str(p))
+    assert ctx.recent_user_requests == [
+        "build a benchmark plan",
+        "focus on regression detection first",
+        "actually use criterion not bench harness",
+    ]
+    # tool_result user-messages stay filtered.
+    assert all("tool_result" not in r for r in ctx.recent_user_requests)
+
+
+def test_recent_user_requests_filters_service_tags(tmp_path: Path):
+    """Regression: Claude Code injects /compact, /goal, command stdout and
+    Stop-hook system-reminders as user-role messages. They were leaking
+    into the watchdog prompt as if the user had typed them, so Haiku graded
+    the agent against /compact instead of the real goal."""
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {"message": {"role": "user", "content": "investigate marlin regression"}},
+            {"message": {"role": "user", "content": "<command-name>/compact</command-name>\n<command-message>compact</command-message>"}},
+            {"message": {"role": "user", "content": "<local-command-stdout>Compacted</local-command-stdout>"}},
+            {"message": {"role": "user", "content": "<command-name>/goal</command-name>"}},
+            {"message": {"role": "user", "content": "<system-reminder>\nA session-scoped Stop hook is now active …\n</system-reminder>"}},
+            {"message": {"role": "user", "content": "now also profile EXL3 kernels"}},
+        ],
+    )
+    ctx = session.load(str(p))
+    assert ctx.recent_user_requests == [
+        "investigate marlin regression",
+        "now also profile EXL3 kernels",
+    ]
+
+
+def test_recent_user_requests_caps_at_max(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(
+        p,
+        [
+            {"message": {"role": "user", "content": f"msg-{i}"}}
+            for i in range(10)
+        ],
+    )
+    ctx = session.load(str(p))
+    assert len(ctx.recent_user_requests) == session.MAX_USER_REQUESTS
+    # Most recent are kept, in chronological order.
+    assert ctx.recent_user_requests == [
+        f"msg-{i}" for i in range(10 - session.MAX_USER_REQUESTS, 10)
+    ]
 
 
 def test_recent_actions_include_edit_diff_so_haiku_sees_prior_context(tmp_path: Path):
@@ -155,4 +225,4 @@ def test_load_tolerates_malformed_lines(tmp_path: Path):
         )
     )
     ctx = session.load(str(p))
-    assert ctx.last_user_request == "hi"
+    assert ctx.recent_user_requests == ["hi"]

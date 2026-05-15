@@ -24,9 +24,24 @@ from typing import Any
 
 @dataclass
 class SessionContext:
-    last_user_request: str | None = None
+    # Distilled current goal of the conversation, produced by goal.py
+    # (Haiku one-shot, cached). When None — distillation wasn't available
+    # (no API auth, error, etc.) — fall back to recent_user_requests.
+    distilled_goal: str | None = None
+    # Up to MAX_USER_REQUESTS most recent user messages, OLDEST first.
+    # Used as fallback context when distilled_goal is unavailable, and as a
+    # second signal so Haiku can spot if the distillation lost something.
+    recent_user_requests: list[str] = field(default_factory=list)
     last_assistant_plan: str | None = None
     recent_actions: list[str] = field(default_factory=list)
+
+    @property
+    def last_user_request(self) -> str | None:
+        """Back-compat / convenience: the latest user message, if any."""
+        return self.recent_user_requests[-1] if self.recent_user_requests else None
+
+
+MAX_USER_REQUESTS = 5
 
 
 def _extract_text(content: Any) -> str | None:
@@ -101,12 +116,22 @@ def _summarize_action(tool_name: str, tool_input: dict[str, Any]) -> str:
     return tool_name
 
 
-def load(transcript_path: str | None, *, max_actions: int = 5) -> SessionContext:
+def load(
+    transcript_path: str | None,
+    *,
+    max_actions: int = 5,
+    session_id: str | None = None,
+    distill: bool = True,
+) -> SessionContext:
     """Read a Claude Code transcript and return distilled context.
 
     Always returns a SessionContext — never raises. When the file is missing,
     unreadable, or in an unexpected format, the corresponding fields stay at
     their defaults.
+
+    `distill=True` (default) runs goal.load_or_distill on the (assistant,
+    user) pairs to produce SessionContext.distilled_goal. Set distill=False
+    in tests where you don't want the extra Haiku call.
     """
     ctx = SessionContext()
     if not transcript_path:
@@ -129,9 +154,12 @@ def load(transcript_path: str | None, *, max_actions: int = 5) -> SessionContext
     except OSError:
         return ctx
 
-    # Walk from the end backwards to find the most recent user instruction.
-    # The transcript intersperses user messages (real user input AND synthetic
-    # tool_result messages, which we want to skip) and assistant messages.
+    # Walk from the end backwards collecting up to MAX_USER_REQUESTS real
+    # user messages (skipping synthetic tool_result wrappers). One message
+    # rarely captures intent — the earlier ones set the goal, the later
+    # ones clarify or correct it. We keep them in chronological order so
+    # Haiku reads them naturally.
+    collected: list[str] = []
     for entry in reversed(entries):
         msg = entry.get("message") if isinstance(entry, dict) else None
         if not isinstance(msg, dict):
@@ -145,9 +173,35 @@ def load(transcript_path: str | None, *, max_actions: int = 5) -> SessionContext
         ):
             continue
         text = _extract_text(content)
-        if text:
-            ctx.last_user_request = text
+        if not text:
+            continue
+        # Strip Claude-Code service tags (<system-reminder>, <command-name>,
+        # <local-command-stdout>, …). Without this the watchdog's "recent
+        # user messages" panel shows /compact stdout, /goal command echoes,
+        # and Stop-hook system-reminders as if they were user intent — and
+        # Haiku then graded the agent against THAT instead of the real goal.
+        from . import goal as goal_mod
+        text = goal_mod.clean_user_text(text)
+        if text is None:
+            continue
+        collected.append(text)
+        if len(collected) >= MAX_USER_REQUESTS:
             break
+    ctx.recent_user_requests = list(reversed(collected))  # oldest first
+
+    # Distil the goal (one Haiku call, cached). Only when there is at least
+    # one real user message — distillation on empty conversation is silly.
+    if distill and session_id and ctx.recent_user_requests:
+        try:
+            from . import goal as goal_mod
+
+            pairs = goal_mod.extract_pairs(entries)
+            if pairs:
+                state = goal_mod.load_or_distill(session_id=session_id, pairs=pairs)
+                ctx.distilled_goal = state.goal
+        except Exception:
+            # Distillation must never break context loading.
+            pass
 
     # Most recent assistant text block.
     for entry in reversed(entries):

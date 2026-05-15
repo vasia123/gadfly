@@ -92,7 +92,10 @@ def main() -> int:
         if not isinstance(tool_input, dict):
             return 0
 
-        ctx = session.load(transcript_path if isinstance(transcript_path, str) else None)
+        ctx = session.load(
+            transcript_path if isinstance(transcript_path, str) else None,
+            session_id=session_id,
+        )
 
         t0 = time.perf_counter()
         result = watchdog.evaluate(

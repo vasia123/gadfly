@@ -22,7 +22,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import log as audit_log
 
@@ -34,6 +34,7 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
     for f in log_dir.glob("*.jsonl"):
         count = 0
         flagged = 0
+        goal_events = 0
         latest_ts: float | None = None
         last_tool: str | None = None
         try:
@@ -45,6 +46,16 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                     try:
                         rec = json.loads(line)
                     except json.JSONDecodeError:
+                        continue
+                    # Distinguish record types. Old records without "type"
+                    # are treated as verdicts (backward compat).
+                    rec_type = rec.get("type", "verdict")
+                    if rec_type == "goal_distill":
+                        goal_events += 1
+                        ts = rec.get("ts")
+                        if isinstance(ts, (int, float)) and (latest_ts is None or ts > latest_ts):
+                            latest_ts = ts
+                            last_tool = "goal"
                         continue
                     count += 1
                     if rec.get("verdict", {}).get("professional") is False:
@@ -60,6 +71,7 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                 "id": f.stem,
                 "count": count,
                 "flagged": flagged,
+                "goal_events": goal_events,
                 "latest_ts": latest_ts,
                 "last_tool": last_tool,
             }
@@ -68,10 +80,22 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
-def _read_session(log_dir: Path, session_id: str) -> list[dict[str, Any]]:
+def _read_session(
+    log_dir: Path,
+    session_id: str,
+    *,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Read a session's audit log.
+
+    Returns {"total": int, "records": [...]}. When `limit` is given, the
+    returned `records` are the `limit` MOST RECENT entries (still in the
+    file's natural chronological order — newest at the end). When `limit`
+    is None, every record is returned.
+    """
     path = log_dir / f"{session_id}.jsonl"
     if not path.is_file():
-        return []
+        return {"total": 0, "records": []}
     records: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
@@ -82,7 +106,10 @@ def _read_session(log_dir: Path, session_id: str) -> list[dict[str, Any]]:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-    return records
+    total = len(records)
+    if limit is not None and limit >= 0:
+        records = records[-limit:] if limit else []
+    return {"total": total, "records": records}
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -110,7 +137,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802
-        path = unquote(self.path.split("?", 1)[0])
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        query = parse_qs(parsed.query)
         if path in ("/", "/index.html"):
             self._send_text(_INDEX_HTML, content_type="text/html; charset=utf-8")
             return
@@ -119,7 +148,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path.startswith("/api/session/"):
             sid = path[len("/api/session/"):]
-            self._send_json(_read_session(self.log_dir, sid))
+            limit_raw = (query.get("limit") or [None])[0]
+            limit: int | None = None
+            if limit_raw is not None:
+                try:
+                    limit = max(0, int(limit_raw))
+                except ValueError:
+                    limit = None
+            self._send_json(_read_session(self.log_dir, sid, limit=limit))
             return
         if path.startswith("/api/system_prompt/"):
             sha = path[len("/api/system_prompt/"):]
@@ -181,6 +217,14 @@ _INDEX_HTML = r"""<!doctype html>
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 14px; overflow: hidden; }
   .card.flag { border-color: #5a2727; }
   .card.err { border-color: #5a4a27; }
+  .card.goal { border-color: #2c4a5a; background: #131a22; }
+  .card.goal-err { border-color: #5a4a27; background: #131a22; }
+  .card.goal .head .tool { color: #88b6d9; }
+  .goal-block { padding: 12px 14px; }
+  .goal-block .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .goal-block .body { font: 13px/1.5 -apple-system, sans-serif; white-space: pre-wrap; }
+  .goal-block .body.prior { color: var(--muted); font-size: 12.5px; }
+  .goal-stats { padding: 8px 14px; color: var(--muted); font-size: 12px; display: flex; gap: 14px; border-bottom: 1px solid var(--border); }
   .card .head { padding: 10px 14px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
   .card .head .tool { font-weight: 600; }
   .card .head .ts { color: var(--muted); font-size: 12px; }
@@ -202,6 +246,10 @@ _INDEX_HTML = r"""<!doctype html>
   details summary:hover { color: var(--text); }
   details > pre { margin: 0; padding: 12px 14px 14px; background: #0b0d12; max-height: 480px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
   .empty { color: var(--muted); padding: 40px 28px; text-align: center; }
+  .load-more { display: flex; justify-content: center; padding: 16px 28px 40px; }
+  .load-more button { background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 8px 24px; border-radius: 6px; cursor: pointer; font: 13px/1.4 -apple-system, sans-serif; }
+  .load-more button:hover { background: var(--panel-2); border-color: var(--accent); }
+  .load-more .count { color: var(--muted); font-size: 12px; margin-left: 10px; }
   .sysprompt-link { font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--muted); }
   .sysprompt-link a { color: var(--accent); }
   #modal { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; padding: 40px; z-index: 100; }
@@ -248,7 +296,14 @@ _INDEX_HTML = r"""<!doctype html>
 let currentSession = null;
 let sessions = [];
 let currentRecords = [];
+let currentTotal = 0;
 let flaggedOnly = localStorage.getItem("gadfly.flaggedOnly") === "1";
+// Pagination state. We always request the LAST N records from the API
+// (newest live at the file's tail). `loadedCount` grows when the user
+// clicks "show N more"; refresh re-fetches with the same loadedCount so
+// the list size doesn't snap back.
+const PAGE_SIZE = 50;
+let loadedCount = PAGE_SIZE;
 // Track which <details> were open keyed by data-detail-key so we can
 // restore them after every re-render (otherwise the 5s auto-refresh
 // would slam every panel shut).
@@ -339,18 +394,35 @@ function renderSessions() {
 async function loadSession(id, switchTo) {
   if (switchTo) {
     currentSession = id;
+    loadedCount = PAGE_SIZE;  // reset pagination when switching sessions
+    lastRecordsSig = "";
     renderSessions();
     document.getElementById("session-title").textContent = "session";
     document.getElementById("session-sid").textContent = id;
   }
   try {
-    const r = await fetch("/api/session/" + encodeURIComponent(id));
-    const records = await r.json();
-    currentRecords = records;
-    renderRecords(records);
+    const r = await fetch(
+      "/api/session/" + encodeURIComponent(id) + "?limit=" + loadedCount
+    );
+    const payload = await r.json();
+    // Backward-compat: very old endpoint format was a bare list.
+    if (Array.isArray(payload)) {
+      currentRecords = payload;
+      currentTotal = payload.length;
+    } else {
+      currentRecords = payload.records || [];
+      currentTotal = payload.total || currentRecords.length;
+    }
+    renderRecords(currentRecords);
   } catch (e) {
     console.error(e);
   }
+}
+
+function loadMore() {
+  loadedCount += PAGE_SIZE;
+  lastRecordsSig = "";  // force re-render
+  if (currentSession) loadSession(currentSession, false);
 }
 
 function detailKey(r, kind) {
@@ -364,9 +436,12 @@ function renderRecords(records) {
   const root = document.getElementById("records");
   if (!records) { root.innerHTML = ""; return; }
   const visible = flaggedOnly
-    ? records.filter(r => r.verdict && r.verdict.professional === false)
+    ? records.filter(r =>
+        (r.verdict && r.verdict.professional === false)
+        || (r.type === "goal_distill" && r.error)  // failed goal events stay visible
+      )
     : records;
-  const sig = JSON.stringify({sid: currentSession, flagged: flaggedOnly, list: visible});
+  const sig = JSON.stringify({sid: currentSession, flagged: flaggedOnly, list: visible, total: currentTotal, loaded: loadedCount});
   if (sig === lastRecordsSig) return;
   lastRecordsSig = sig;
   if (visible.length === 0) {
@@ -376,8 +451,9 @@ function renderRecords(records) {
     return;
   }
   // Newest first
-  records = visible.slice().reverse();
-  root.innerHTML = records.map(r => {
+  const newestFirst = visible.slice().reverse();
+  const cardsHtml = newestFirst.map(r => {
+    if (r.type === "goal_distill") return renderGoalEvent(r);
     const v = r.verdict || {};
     const pro = v.professional;
     const flagged = pro === false;
@@ -420,6 +496,62 @@ function renderRecords(records) {
       </div>
     `;
   }).join("");
+
+  // Pagination footer. Show "load more" when the audit log has older
+  // records the user hasn't fetched yet. Note: `currentTotal` is the
+  // *unfiltered* count from the API; when `flaggedOnly` is on, the gap
+  // between `loadedCount` and `currentTotal` may still reflect entries
+  // that wouldn't pass the filter, but loading them is still useful in
+  // case more flagged ones live further back.
+  let footerHtml = "";
+  if (currentTotal > loadedCount) {
+    const remaining = currentTotal - loadedCount;
+    const nextStep = Math.min(PAGE_SIZE, remaining);
+    footerHtml = `
+      <div class="load-more">
+        <button onclick="loadMore()">show ${nextStep} more</button>
+        <span class="count">${loadedCount} of ${currentTotal} loaded · ${remaining} older still on disk</span>
+      </div>
+    `;
+  } else if (currentTotal > PAGE_SIZE) {
+    footerHtml = `<div class="load-more"><span class="count">all ${currentTotal} records loaded</span></div>`;
+  }
+  root.innerHTML = cardsHtml + footerHtml;
+}
+
+function renderGoalEvent(r) {
+  const failed = !!r.error;
+  const cls = failed ? "card goal-err" : "card goal";
+  const badge = failed
+    ? '<span class="badge warn">goal failed</span>'
+    : '<span class="badge" style="background:rgba(136,182,217,0.18);color:#88b6d9;">goal updated</span>';
+  const stats = [
+    `pairs total: ${r.pairs_total ?? '?'}`,
+    `new: ${r.pairs_new ?? 0}`,
+    `cached: ${r.pairs_cached ?? 0}`,
+  ].join(' · ');
+  return `
+    <div class="${cls}">
+      <div class="head">
+        <span class="tool">goal distill</span>
+        ${badge}
+        <span class="ts">${fmtTs(r.ts)}</span>
+        <span class="lat">${fmtMs(r.latency_ms)}</span>
+      </div>
+      <div class="goal-stats">${escapeHtml(stats)}</div>
+      ${failed ? `<div class="verdict-msg error"><b>error:</b> ${escapeHtml(r.error)}</div>` : ''}
+      ${r.prior_goal ? `
+        <div class="goal-block">
+          <div class="label">previous goal</div>
+          <div class="body prior">${escapeHtml(r.prior_goal)}</div>
+        </div>` : ''}
+      ${r.goal ? `
+        <div class="goal-block">
+          <div class="label">${r.prior_goal ? 'updated goal' : 'distilled goal'}</div>
+          <div class="body">${escapeHtml(r.goal)}</div>
+        </div>` : ''}
+    </div>
+  `;
 }
 
 async function loadSysPrompt(sha, targetId) {

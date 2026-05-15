@@ -1,36 +1,35 @@
 # gadfly
 
-Watchdog over Claude Code sessions. After every `Edit` / `Write` / `MultiEdit` /
-`Bash` action the agent takes, a `PostToolUse` hook calls Haiku (via the
-Anthropic API) and asks one question:
+A watchdog that catches Claude Code agents the moment they start cutting
+corners — stubbing things out, swallowing errors, fixing symptoms instead
+of causes, or rationalising shortcuts ("the real X is harder than needed,
+let me just use a proxy"). After every action the agent takes, gadfly
+asks Haiku 4.5 one question — *is this a professional approach or a
+shortcut?* — and if it's a shortcut, the critique is fed back into the
+agent's session in the same turn. The agent sees the note and usually
+fixes the work right away.
 
-> Is this action a *professional* approach to the task, or a corner-cutting
-> shortcut?
+When the agent is being honest, gadfly stays silent. That's the default.
 
-If Haiku flags the action as unprofessional, gadfly returns a warning back to
-the Claude Code session via `hookSpecificOutput.additionalContext`, and the
-agent sees it inside the same turn — typically prompting it to redo the work
-properly.
+## What you need
 
-If Haiku says it's fine, gadfly stays silent. Silence is the default.
+- [Claude Code](https://docs.claude.com/en/docs/claude-code) installed and signed in (subscription works — no separate API key needed)
+- [uv](https://github.com/astral-sh/uv) for Python deps
+- Python 3.11+
 
 ## Install
 
 ```bash
-cd /path/to/gadfly
+git clone <this repo>
+cd gadfly
 uv sync
 ```
 
-Set your API key:
+## Hook it into Claude Code
 
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-```
-
-## Wire into Claude Code
-
-Add this to `~/.claude/settings.json` (global) or `.claude/settings.json`
-(per project):
+Add this to `~/.claude/settings.json` (global — every session) or
+`<project>/.claude/settings.json` (one project only). Merge with whatever
+hooks you already have — don't overwrite the whole file:
 
 ```json
 {
@@ -50,59 +49,100 @@ Add this to `~/.claude/settings.json` (global) or `.claude/settings.json`
 }
 ```
 
-See `settings.example.json` for a template. Use the direct `.venv/bin/python`
-path — `uv run` adds ~300–800ms of startup overhead per invocation.
+A ready-made template is in `settings.example.json`.
 
-## Operate
+Use the direct `.venv/bin/python` path. Don't substitute `uv run` — it
+adds hundreds of milliseconds per invocation and the hook runs on every
+single `Edit` / `Write` / `Bash`.
 
-- **Kill switch**: `export GADFLY_DISABLE=1` — hook exits 0 with no work done.
-- **Audit log**: every verdict is appended to
-  `~/.claude/gadfly/log/<session-id>.jsonl`, one JSON record per line.
-  Override the directory with `GADFLY_LOG_DIR`.
-- **Failures are silent**: missing API key, network errors, malformed
-  responses — none of these break the parent Claude Code session. They are
-  recorded in the audit log and the hook exits 0.
+That's it. Start a new Claude Code session (or run any tool in your
+existing one) and gadfly is live.
 
-## View the log in your browser
+## See what's happening
 
 ```bash
-.venv/bin/python -m gadfly.viewer       # opens http://127.0.0.1:7777 in your browser
-# or
-.venv/bin/gadfly-view --no-browser      # just serve, don't auto-open
+.venv/bin/python -m gadfly.viewer
+# opens http://127.0.0.1:7777 in your browser
 ```
 
-The viewer is stdlib-only (no Flask), reads `~/.claude/gadfly/log/` directly,
-and auto-refreshes every 5 seconds. For each verdict you can expand:
+The viewer shows every session gadfly has watched, with every verdict
+expanded:
 
-- the **tool input** and **tool response** the agent emitted,
-- the **prompt sent to Haiku** (exactly what Haiku saw),
-- the **raw payload** from Claude Code,
-- the **system prompt** (content-addressed by SHA, click to load).
+- which tool call was evaluated
+- the exact reasoning that came before it
+- the raw payload Claude Code handed the hook
+- the prompt sent to Haiku
+- Haiku's verdict (professional or not, reason, suggestion)
 
-Sessions with at least one unprofessional verdict are highlighted, and the
-record card uses a red border so flagged actions are obvious at a glance.
+Sessions and individual verdicts with unprofessional findings get red
+highlights. There's a **"flagged only"** filter in the top bar — flip it
+on to see just the cases gadfly caught.
 
-## Test
+It auto-refreshes every 5 seconds. Leave it open in a tab while you work.
+
+## Performance
+
+The watchdog adds ~10-20 seconds to each Edit / Write / Bash the first
+time, ~3-5 seconds after Claude Code's CLI is warm. The latency is the
+cost of running Haiku 4.5 against your subscription rather than
+requiring a separate API key.
+
+For long turns (the agent is editing a substantial file or running a
+long bash command) this is invisible. For a flurry of small actions it's
+noticeable. If it bothers you, see the "killswitch" below.
+
+## Turn it off
+
+Temporarily, without removing the hook:
 
 ```bash
-.venv/bin/python -m pytest -q
+export GADFLY_DISABLE=1
 ```
 
-## How it works
+Any session in that shell will skip the watchdog entirely. Unset to
+re-enable.
 
-```
-Claude Code session
-      │
-      ▼  Edit / Write / MultiEdit / Bash completes
-PostToolUse hook
-      │
-      ▼  python -m gadfly.hook  (reads JSON from stdin)
-hook.main
-  ├─ session.load(transcript_path)  →  last user request, last assistant text,
-  │                                    last few tool actions
-  ├─ watchdog.evaluate(...)         →  Haiku 4.5 + tool-use submit_verdict
-  │                                    via direct anthropic SDK
-  ├─ log.append(...)                →  one JSONL record
-  └─ stdout: nothing  OR  {"hookSpecificOutput": {"hookEventName":
-                            "PostToolUse", "additionalContext": "..."}}
+Permanently — just remove the `PostToolUse` block you added to
+`settings.json`.
+
+## Where things live
+
+- `~/.claude/gadfly/log/<session-id>.jsonl` — one record per verdict.
+  Plain JSONL, safe to inspect with `jq`.
+- `~/.claude/gadfly/system_prompts/<sha>.txt` — every system prompt
+  gadfly has used, content-addressed so old verdicts stay reproducible
+  even after the rubric evolves.
+
+You can override the log location with `GADFLY_LOG_DIR=/some/path`.
+
+## What it catches
+
+Examples of what gadfly flags as unprofessional in practice:
+
+- `git commit --no-verify` to skip a failing pre-commit hook
+- Deleting a failing test file as a way of "fixing" it
+- `if x is None: x = default` as a guard instead of fixing why x came None
+- `try: ... except: pass` without a written-down reason
+- `time.sleep()` to paper over a race condition
+- Replacing a real component with a mock "because the real one is harder
+  than needed", without acknowledging the trade-off
+
+And what it stays quiet about:
+
+- Style, formatting, naming, micro-optimisations
+- One reasonable design choice over another
+- Honest exploration: `Read`, `grep`, `git diff`, running tests
+- TODOs tracking genuinely out-of-scope follow-up work
+- Workarounds the user / agent explicitly acknowledged as workarounds
+
+## For developers
+
+If you want to change the rubric, calibrate against the real model, or
+understand the architecture, see `CLAUDE.md`.
+
+Quick start:
+
+```bash
+.venv/bin/python -m pytest -q       # unit tests, fully mocked
+.venv/bin/python scripts/probe.py   # live calibration against real Haiku
 ```

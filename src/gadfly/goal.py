@@ -1,0 +1,559 @@
+"""Distil the agent's *current goal* from the conversation trail.
+
+Why this exists
+---------------
+A single raw user message rarely captures the goal of the work the agent
+is doing. People say "actually use criterion not bench harness" — that line
+alone is meaningless. To understand it you need the assistant's previous
+proposal it was replying to ("I'll use the cargo bench harness for Tier 2 …")
+plus the earlier user message that set the original objective ("design a
+benchmark plan that catches regressions before full e2e …"). Worse,
+transcripts contain junk we don't want feeding the watchdog: synthetic
+`[Request interrupted by user for tool use]` markers, exact duplicates
+when a user re-submits the same message, and tool_result wrappers.
+
+So we extract *pairs* (preceding-assistant-text, user-text) walking the
+transcript chronologically, then ask Haiku once: "given the conversation
+so far, in one or two sentences — what is the agent supposed to be doing
+right now?". The answer is cached per session, keyed by the hash of the
+pairs already distilled, and grown incrementally: when a new user message
+appears, we feed Haiku (cached_goal, new_pairs) → new_goal. Between tool
+calls in the same turn nothing changes, so the cache is reused — which
+keeps the distillation cost roughly *per user message*, not per hook call.
+
+Failure semantics — same as the rest of gadfly: any error returns None
+and is logged via the regular audit-log error field. Distillation is a
+quality boost, not a requirement.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import re
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+from claude_agent_sdk import (
+    ClaudeAgentOptions,
+    ThinkingConfigDisabled,
+    create_sdk_mcp_server,
+    query,
+    tool,
+)
+
+from . import log as audit_log
+
+
+# --- Public types ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pair:
+    """One (preceding assistant text, user message) tuple."""
+
+    assistant_text: str | None
+    user_text: str
+
+    def to_cache_hash(self) -> str:
+        h = hashlib.sha256()
+        h.update((self.assistant_text or "").encode("utf-8"))
+        h.update(b"\x00")
+        h.update(self.user_text.encode("utf-8"))
+        return h.hexdigest()[:16]
+
+
+@dataclass
+class GoalState:
+    """What we know about the agent's goal in this session.
+
+    Returned to the watchdog so it can decide what to feed Haiku as context.
+    """
+
+    goal: str | None = None
+    # The raw pairs that have NOT yet been distilled into goal (e.g. when
+    # distillation failed or no API auth). The watchdog can fall back to
+    # showing these as-is.
+    raw_pairs: list[Pair] | None = None
+    error: str | None = None
+
+
+# --- Pair extraction ---------------------------------------------------------
+
+
+_JUNK_PATTERNS = (
+    "[Request interrupted by user for tool use]",
+    "[Request interrupted by user]",
+)
+
+# Tags that Claude Code injects into the user-role content stream but that
+# are NOT real user intent. We strip them before deciding whether the
+# message has any signal left. Single source of truth — also used by
+# session.py to filter recent_user_requests.
+_STRIPPABLE_TAGS = (
+    "system-reminder",
+    "command-name",
+    "command-message",
+    "command-args",
+    "local-command-stdout",
+    "local-command-stderr",
+    "local-command-caveat",
+    "task-notification",
+)
+
+_TAG_BLOCK_RE = re.compile(
+    r"<(" + "|".join(_STRIPPABLE_TAGS) + r")\b[^>]*>.*?</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def clean_user_text(text: str) -> str | None:
+    """Strip Claude-Code-injected service tags from a user message.
+
+    Returns the cleaned text, or None when nothing meaningful is left
+    (the whole message was just service tags / interrupt markers /
+    whitespace). Used by both pair extraction and recent_user_requests
+    collection so the watchdog never sees service noise as "user intent".
+    """
+    if not isinstance(text, str):
+        return None
+    cleaned = _TAG_BLOCK_RE.sub("", text)
+    cleaned = cleaned.strip()
+    if not cleaned:
+        return None
+    if any(p in cleaned for p in _JUNK_PATTERNS):
+        # Synthetic interrupt markers — drop the whole message even if
+        # something else got concatenated. In practice these arrive alone.
+        without_markers = cleaned
+        for p in _JUNK_PATTERNS:
+            without_markers = without_markers.replace(p, "")
+        without_markers = without_markers.strip()
+        if not without_markers:
+            return None
+        cleaned = without_markers
+    return cleaned
+
+
+def _extract_text_block(content: Any) -> str | None:
+    if isinstance(content, str):
+        return content.strip() or None
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                t = b.get("text")
+                if isinstance(t, str) and t.strip():
+                    chunks.append(t.strip())
+        if chunks:
+            return "\n".join(chunks)
+    return None
+
+
+def _is_pure_tool_result(content: Any) -> bool:
+    return isinstance(content, list) and all(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    )
+
+
+def extract_pairs(entries: list[dict[str, Any]]) -> list[Pair]:
+    """Walk transcript entries chronologically, build (prev_assistant, user) pairs.
+
+    - Skips synthetic tool_result-only user messages.
+    - Skips `[Request interrupted by user for tool use]` markers.
+    - De-duplicates exact-repeat user texts in a row (e.g. when the user
+      hits resend after a slow turn).
+    """
+    pairs: list[Pair] = []
+    last_assistant_text: str | None = None
+    last_user_text: str | None = None
+
+    for entry in entries:
+        msg = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role == "assistant":
+            text = _extract_text_block(content)
+            if text:
+                last_assistant_text = text
+            continue
+
+        if role == "user":
+            if _is_pure_tool_result(content):
+                continue
+            text = _extract_text_block(content)
+            if text is None:
+                continue
+            text = clean_user_text(text)
+            if text is None:
+                continue
+            if text == last_user_text:
+                # Exact duplicate (resend) — skip.
+                continue
+            pairs.append(Pair(assistant_text=last_assistant_text, user_text=text))
+            last_user_text = text
+            # Once consumed, assistant context belongs to this pair; the
+            # next pair should pair with whatever assistant text comes
+            # next, not re-use this one.
+            last_assistant_text = None
+
+    return pairs
+
+
+# --- Cache -------------------------------------------------------------------
+
+
+def _cache_dir() -> Path:
+    base = os.environ.get("GADFLY_LOG_DIR")
+    if base:
+        return Path(base).parent / "goals"
+    return Path.home() / ".claude" / "gadfly" / "goals"
+
+
+def _cache_path(session_id: str) -> Path:
+    safe = session_id.replace("/", "_") or "unknown"
+    return _cache_dir() / f"{safe}.json"
+
+
+@dataclass
+class _CacheEntry:
+    goal: str
+    pair_hashes: list[str]  # in order — corresponds to the pairs we have
+    # already distilled into goal
+    ts: float
+    # SHA prefix of the SYSTEM_PROMPT used when this cache entry was
+    # produced. When the prompt is tightened in code, we want the cache
+    # to invalidate automatically — otherwise the user keeps seeing stale
+    # distilled goals built by an older rubric.
+    prompt_sha: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _system_prompt_sha() -> str:
+    return hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_cache(session_id: str) -> _CacheEntry | None:
+    try:
+        p = _cache_path(session_id)
+        if not p.is_file():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        goal = data.get("goal")
+        hashes = data.get("pair_hashes")
+        ts = data.get("ts")
+        prompt_sha = data.get("prompt_sha") or ""
+        if not isinstance(goal, str) or not isinstance(hashes, list):
+            return None
+        # Invalidate when the SYSTEM_PROMPT has been edited since this
+        # entry was produced — the calibration may have changed
+        # substantively (e.g. new "unresolved-problem priority" rule)
+        # and we want the next distillation to apply the current rubric
+        # from scratch rather than build on the old understanding.
+        if prompt_sha and prompt_sha != _system_prompt_sha():
+            return None
+        return _CacheEntry(
+            goal=goal,
+            pair_hashes=[str(h) for h in hashes],
+            ts=float(ts or 0),
+            prompt_sha=str(prompt_sha),
+        )
+    except Exception:
+        return None
+
+
+def _save_cache(session_id: str, entry: _CacheEntry) -> None:
+    try:
+        d = _cache_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        _cache_path(session_id).write_text(
+            json.dumps(entry.to_dict(), ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+# --- Distillation via Haiku --------------------------------------------------
+
+
+SYSTEM_PROMPT = """\
+You are a goal-distillation assistant for a code-supervision system.
+
+Given a conversation between a user and a coding agent (as a series of
+(assistant_text, user_text) pairs), and optionally a previous goal
+summary, produce ONE to THREE sentences describing what the agent should
+be working on RIGHT NOW.
+
+Rules:
+
+(1) Capture the *current* objective. If the user has redirected or
+    narrowed the task in later messages, follow the latest redirection.
+
+(2) Preserve concrete nouns (file names, function names, library names,
+    metric names). Drop chit-chat.
+
+(3) Do not include the agent's proposed implementation steps. Just the
+    goal as the user has framed it.
+
+(4) If a previous goal is given, treat it as the agent's understanding so
+    far. Update it with the new pairs.
+
+(5) **Unresolved-problem priority.** This is the most important rule.
+    When a new user message reports that an EARLIER problem is still not
+    fixed — phrasings like "the bug is still there", "doesn't work",
+    "didn't help", "this hasn't gone away", "проблема осталась",
+    "баг никуда не делся", "не сработало" — that earlier problem is now
+    the TOP priority of the goal, even if the agent has been working on
+    something else in between. Do NOT drop it from the goal just because
+    later pairs went off on tangents. The newer work, if any, becomes
+    secondary or is on hold until the original bug is fixed.
+
+    Concrete example:
+      pair N-3: user → "fix bug X"
+      pair N-2: agent → "fixed (here is patch)"  +  user → "now do feature Y"
+      pair N-1: agent → "Y done"               +  user → "bug X is still there"
+    Distilled goal: "Fix bug X — it is still reproducing after the first
+    attempt. Feature Y (which was added on top) is on hold until X is
+    actually resolved."
+
+(6) When in doubt about whether two threads are part of the same goal or
+    two separate goals, list BOTH in the distilled summary. Losing
+    information is worse than slightly more verbose output.
+
+(7) Output your answer by calling the `submit_goal` tool exactly once.
+    Do not write any text outside the tool call.
+"""
+
+
+SUBMIT_GOAL_DESCRIPTION = (
+    "Submit the distilled goal. Call this exactly once. Field `goal` "
+    "is one or two short sentences describing what the agent should be "
+    "working on right now, preserving concrete names from the conversation."
+)
+
+
+def _build_user_prompt(prior_goal: str | None, pairs: list[Pair]) -> str:
+    parts: list[str] = []
+    if prior_goal:
+        parts.append("## Previous goal (the agent's current understanding)\n" + prior_goal)
+    parts.append("## Conversation pairs (oldest first)")
+    for i, pair in enumerate(pairs, start=1):
+        block = [f"### pair {i}"]
+        if pair.assistant_text:
+            block.append("agent said:\n" + pair.assistant_text[:1500])
+        block.append("user replied:\n" + pair.user_text[:2000])
+        parts.append("\n\n".join(block))
+    parts.append(
+        "## Task\n"
+        "Distil the agent's CURRENT goal from the conversation above. "
+        "Call submit_goal exactly once."
+    )
+    return "\n\n".join(parts)
+
+
+@dataclass
+class _Captured:
+    goal: str | None = None
+
+
+def _build_submit_goal_tool(captured: _Captured):
+    @tool(
+        "submit_goal",
+        SUBMIT_GOAL_DESCRIPTION,
+        {"goal": str},
+    )
+    async def submit_goal(args: dict[str, Any]) -> dict[str, Any]:
+        g = args.get("goal")
+        if isinstance(g, str):
+            captured.goal = g.strip()
+        return {"content": [{"type": "text", "text": "goal recorded"}]}
+
+    return submit_goal
+
+
+def _build_options(captured: _Captured, model: str) -> ClaudeAgentOptions:
+    server = create_sdk_mcp_server(
+        "gadfly_goal",
+        "1.0.0",
+        [_build_submit_goal_tool(captured)],
+    )
+    return ClaudeAgentOptions(
+        model=model,
+        system_prompt=SYSTEM_PROMPT,
+        mcp_servers={"gadfly_goal": server},
+        allowed_tools=["mcp__gadfly_goal__submit_goal"],
+        permission_mode="bypassPermissions",
+        setting_sources=[],
+        # See watchdog._build_options — empty `settings="{}"` is the
+        # actual recursion guard (`hooks={}` was a no-op because the SDK
+        # does not propagate it to the inner CLI).
+        settings="{}",
+        # See watchdog._build_options for the TypedDict caveat — `type=` kwarg
+        # is mandatory or the SDK errors with `KeyError('type')`.
+        thinking=ThinkingConfigDisabled(type="disabled"),
+        # max_turns=2: turn 1 emits submit_goal, turn 2 closes out.
+        max_turns=2,
+        env={"GADFLY_INTERNAL": "1"},
+    )
+
+
+RunQuery = Callable[[str, ClaudeAgentOptions], Awaitable[None]]
+
+
+async def _default_run_query(prompt: str, options: ClaudeAgentOptions) -> None:
+    async for _ in query(prompt=prompt, options=options):
+        pass
+
+
+DEFAULT_MODEL = "claude-haiku-4-5"
+DEFAULT_TIMEOUT_S = 30.0
+
+
+async def _distill_async(
+    *,
+    prior_goal: str | None,
+    pairs: list[Pair],
+    model: str = DEFAULT_MODEL,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    run_query: RunQuery = _default_run_query,
+) -> tuple[str | None, str | None]:
+    """Return (goal, error_or_none)."""
+    captured = _Captured()
+    options = _build_options(captured, model)
+    prompt = _build_user_prompt(prior_goal, pairs)
+    try:
+        await asyncio.wait_for(run_query(prompt, options), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        return None, f"timeout after {timeout_s}s"
+    except FileNotFoundError as exc:
+        return None, f"claude CLI not found: {exc!s}"
+    except Exception as exc:
+        return None, f"agent-sdk error: {exc!r}"
+    if not captured.goal:
+        return None, "Haiku did not call submit_goal"
+    return captured.goal, None
+
+
+# --- Public entry point ------------------------------------------------------
+
+
+def load_or_distill(
+    *,
+    session_id: str,
+    pairs: list[Pair],
+    run_query: RunQuery = _default_run_query,
+    model: str = DEFAULT_MODEL,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+) -> GoalState:
+    """Return the current goal state for this session.
+
+    Uses the cache when nothing has changed; runs incremental distillation
+    when one or more new pairs have appeared. Falls back gracefully when
+    distillation isn't available (returns raw_pairs so the caller can still
+    show them as fallback context).
+    """
+    if not pairs:
+        return GoalState(goal=None, raw_pairs=[], error=None)
+
+    cache = _load_cache(session_id)
+    pair_hashes = [p.to_cache_hash() for p in pairs]
+
+    # Identify how many leading pairs match the cache. If the cache prefix
+    # doesn't match (e.g. transcript was rewritten / forked), invalidate
+    # entirely.
+    consumed = 0
+    if cache:
+        prefix = cache.pair_hashes
+        for i, h in enumerate(prefix):
+            if i >= len(pair_hashes) or pair_hashes[i] != h:
+                break
+            consumed += 1
+        if consumed != len(prefix):
+            cache = None
+            consumed = 0
+
+    new_pairs = pairs[consumed:]
+    if cache and not new_pairs:
+        # Nothing new — return cached goal verbatim. Don't log: a no-op
+        # cache hit on every PostToolUse would flood the audit log.
+        return GoalState(goal=cache.goal, raw_pairs=[], error=None)
+
+    prior_goal = cache.goal if cache else None
+    pairs_cached = consumed
+    pairs_new = len(new_pairs)
+
+    t0 = time.perf_counter()
+    try:
+        goal, err = asyncio.run(
+            _distill_async(
+                prior_goal=prior_goal,
+                pairs=new_pairs,
+                model=model,
+                timeout_s=timeout_s,
+                run_query=run_query,
+            )
+        )
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - t0) * 1000
+        audit_log.append_goal_event(
+            session_id=session_id,
+            pairs_total=len(pairs),
+            pairs_new=pairs_new,
+            pairs_cached=pairs_cached,
+            prior_goal=prior_goal,
+            goal=None,
+            latency_ms=latency_ms,
+            error=f"asyncio.run failed: {exc!r}",
+            cache_hit=False,
+        )
+        return GoalState(goal=prior_goal, raw_pairs=new_pairs, error=f"asyncio.run failed: {exc!r}")
+
+    latency_ms = (time.perf_counter() - t0) * 1000
+
+    if goal is None:
+        # Distillation failed — fall back to cached goal (if any) and the
+        # raw new pairs so the watchdog still gets *some* context.
+        audit_log.append_goal_event(
+            session_id=session_id,
+            pairs_total=len(pairs),
+            pairs_new=pairs_new,
+            pairs_cached=pairs_cached,
+            prior_goal=prior_goal,
+            goal=None,
+            latency_ms=latency_ms,
+            error=err,
+            cache_hit=False,
+        )
+        return GoalState(goal=prior_goal, raw_pairs=new_pairs, error=err)
+
+    _save_cache(
+        session_id,
+        _CacheEntry(
+            goal=goal,
+            pair_hashes=pair_hashes,
+            ts=time.time(),
+            prompt_sha=_system_prompt_sha(),
+        ),
+    )
+    audit_log.append_goal_event(
+        session_id=session_id,
+        pairs_total=len(pairs),
+        pairs_new=pairs_new,
+        pairs_cached=pairs_cached,
+        prior_goal=prior_goal,
+        goal=goal,
+        latency_ms=latency_ms,
+        error=None,
+        cache_hit=False,
+    )
+    return GoalState(goal=goal, raw_pairs=[], error=None)
