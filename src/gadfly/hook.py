@@ -34,10 +34,30 @@ import time
 from typing import Any
 
 from . import log as audit_log
-from . import session, watchdog
+from . import journal, session, watchdog
 from .verdict import Verdict
 
 WATCHED_TOOLS = {"Edit", "Write", "MultiEdit", "Bash"}
+
+
+def _summarize_action_for_journal(tool_name: str, tool_input: dict[str, Any]) -> str:
+    """Compact one-liner summary for the journal maintainer.
+
+    Larger / more structured than the verdict prompt's mini-diff — Haiku
+    needs the gist (which file, which command) but the journal does not
+    persist the full diff.
+    """
+    if tool_name == "Edit":
+        return f"Edit({tool_input.get('file_path', '?')})"
+    if tool_name == "Write":
+        return f"Write({tool_input.get('file_path', '?')})"
+    if tool_name == "MultiEdit":
+        edits = tool_input.get("edits") or []
+        return f"MultiEdit({tool_input.get('file_path', '?')}, {len(edits)} edits)"
+    if tool_name == "Bash":
+        cmd = str(tool_input.get("command", ""))[:200]
+        return f"Bash: {cmd}"
+    return tool_name
 
 
 def _read_payload() -> dict[str, Any] | None:
@@ -96,6 +116,35 @@ def main() -> int:
             transcript_path if isinstance(transcript_path, str) else None,
             session_id=session_id,
         )
+
+        # Phase-1 shadow: maintain a session journal alongside the
+        # existing watchdog. The verdict prompt does NOT yet consume the
+        # journal — we are gathering real-session journals first to
+        # validate they look sane before switching the watchdog to read
+        # from them. Opt out with GADFLY_JOURNAL=0.
+        #
+        # Phase-2 cutover (opt-in via GADFLY_JOURNAL_VERDICT=1): the
+        # freshly-updated journal is loaded back into the session context
+        # so watchdog.evaluate consumes it as primary verdict context.
+        if os.environ.get("GADFLY_JOURNAL", "1") == "1":
+            try:
+                action_summary = _summarize_action_for_journal(tool_name, tool_input)
+                result_j = journal.update_for_action(
+                    session_id=session_id,
+                    action_index=ctx.action_index,
+                    action_summary=action_summary,
+                    assistant_reasoning=ctx.last_assistant_plan,
+                    pairs=ctx.pairs,
+                )
+                # Phase 2 default: the watchdog reads the journal as
+                # primary context. Rollback to legacy by setting
+                # GADFLY_JOURNAL_VERDICT=0.
+                if os.environ.get("GADFLY_JOURNAL_VERDICT", "1") != "0":
+                    ctx.journal = result_j.journal
+            except Exception:
+                # Journal must never break the hook. Swallowed silently;
+                # journal.update_for_action already logs its own errors.
+                pass
 
         t0 = time.perf_counter()
         result = watchdog.evaluate(

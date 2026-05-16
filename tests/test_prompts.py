@@ -78,6 +78,95 @@ def test_user_message_marks_assistant_plan_as_part_of_evaluation():
     assert "reasoning" in msg.lower()
 
 
+def test_journal_system_prompt_includes_load_bearing_sections():
+    """Phase-2 prompt extends the legacy one with four new sections that
+    every journal-aware verdict must respect. If any marker disappears,
+    the calibration we wired up to fix the cuda-layernorm echo-chamber
+    regresses."""
+    p = prompts.SYSTEM_PROMPT_JOURNAL.lower()
+    # All legacy markers still present.
+    assert "rationalization:" in p
+    assert "symptom fix:" in p
+    # Journal-reader section.
+    assert "session journal" in p
+    assert "workstreams" in p
+    assert "flag_history" in p
+    # Repetition rule — the load-bearing fix for echo-chamber.
+    assert "repetition rule" in p
+    assert "agent_pushed_back" in p
+    assert "stay silent" in p
+    # Rationalization cross-check via journal notes.
+    assert "cross-check" in p
+    assert "notes" in p
+    # Drift is informational.
+    assert "drift" in p
+    assert "do not flag drift" in p
+
+
+def test_build_user_message_journal_mode_renders_journal_block():
+    from gadfly.journal import Journal, Workstream, FlagEvent, Drift
+
+    j = Journal(
+        root_goal="fix cuda-layernorm regression and ship",
+        workstreams=[
+            Workstream(
+                id="cuda-layernorm",
+                title="cuda-layernorm 4.3us regression",
+                status="in-progress",
+                origin="action #34",
+                notes="capture-state dispatch landed in normalization.rs:92",
+                watchdog_flags=5,
+                flag_history=[
+                    FlagEvent(
+                        action_index=40,
+                        reason="symptom fix, not root cause",
+                        marker="symptom",
+                        agent_pushed_back=True,
+                        pushback="edits did land, watchdog reads stale ctx",
+                    ),
+                ],
+                last_touched=88,
+            )
+        ],
+        drift=Drift(initial_workstream_ids=["marlin", "tiered-bench"], observations="cuda-layernorm emerged unplanned"),
+        action_index=88,
+    )
+    msg = prompts.build_user_message(
+        tool_name="Write",
+        tool_input={"file_path": "MEMORY.md", "content": "summary"},
+        tool_response={"success": True},
+        recent_user_requests=["IGNORED in journal mode"],
+        last_assistant_plan="Updating memory after fix landed",
+        recent_actions=["IGNORED in journal mode"],
+        journal=j,
+    )
+    assert "Session journal" in msg
+    assert "cuda-layernorm 4.3us regression" in msg
+    assert "in-progress" in msg
+    assert "agent pushed back" in msg
+    assert "REPETITION RULE" in msg
+    assert "RATIONALIZATION cross-check" in msg
+    # Journal mode drops legacy blocks.
+    assert "User messages in this conversation" not in msg
+    assert "Recent prior actions" not in msg
+
+
+def test_build_user_message_falls_back_to_legacy_when_journal_empty():
+    from gadfly.journal import empty_journal
+
+    msg = prompts.build_user_message(
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+        tool_response={"stdout": ""},
+        recent_user_requests=["do X"],
+        last_assistant_plan=None,
+        recent_actions=[],
+        journal=empty_journal(),
+    )
+    # Falls through because the journal has no workstreams.
+    assert "User messages in this conversation" in msg
+
+
 def test_system_prompt_includes_root_cause_discipline():
     """Regression: the rubric must spell out symptom-vs-cause explicitly,
     not just mention it in passing — otherwise Haiku won't reliably flag

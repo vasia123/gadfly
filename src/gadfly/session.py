@@ -17,6 +17,7 @@ skipped, and missing context degrades to None / empty list rather than raising.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,18 @@ class SessionContext:
     recent_user_requests: list[str] = field(default_factory=list)
     last_assistant_plan: str | None = None
     recent_actions: list[str] = field(default_factory=list)
+    # Full chronological (assistant, user) pair list — consumed by the
+    # journal updater. Pure transcript output; no Haiku call.
+    pairs: list[Any] = field(default_factory=list)
+    # Number of assistant tool_uses observed in the transcript so far.
+    # Used by journal as action_index — monotonically increasing per
+    # session.
+    action_index: int = 0
+    # The session journal as loaded from disk after the maintainer ran.
+    # None in Phase 1 (journal not consumed by the verdict prompt) or
+    # when journal-mode is disabled (GADFLY_JOURNAL=0). When set, the
+    # watchdog prompt switches to journal-aware composition.
+    journal: Any = None
 
     @property
     def last_user_request(self) -> str | None:
@@ -191,7 +204,13 @@ def load(
 
     # Distil the goal (one Haiku call, cached). Only when there is at least
     # one real user message — distillation on empty conversation is silly.
-    if distill and session_id and ctx.recent_user_requests:
+    #
+    # Phase 2: when the journal-aware verdict prompt is on (default), the
+    # journal already owns root_goal — running the legacy distillation in
+    # parallel would burn +3s per new user message for nothing. Skip it.
+    # Rolling back to Phase 1 (GADFLY_JOURNAL_VERDICT=0) brings it back.
+    phase2_on = os.environ.get("GADFLY_JOURNAL_VERDICT", "1") != "0"
+    if distill and session_id and ctx.recent_user_requests and not phase2_on:
         try:
             from . import goal as goal_mod
 
@@ -215,12 +234,25 @@ def load(
 
     # Last `max_actions` tool_use summaries, in chronological order.
     actions: list[str] = []
+    total_tool_uses = 0
     for entry in entries:
         msg = entry.get("message") if isinstance(entry, dict) else None
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
         for name, inp in _extract_tool_uses(msg.get("content")):
             actions.append(_summarize_action(name, inp))
+            total_tool_uses += 1
     ctx.recent_actions = actions[-max_actions:]
+    ctx.action_index = total_tool_uses
+
+    # Full pair list for the journal updater. Cheap (pure parsing,
+    # already-loaded entries). Done last so a failure here can't poison
+    # the rest of the context.
+    try:
+        from . import pairs as pairs_mod
+
+        ctx.pairs = pairs_mod.extract_pairs(entries)
+    except Exception:
+        ctx.pairs = []
 
     return ctx

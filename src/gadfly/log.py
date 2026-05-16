@@ -39,6 +39,39 @@ def _system_prompts_dir() -> Path:
     return _root().parent / "system_prompts"
 
 
+def _journals_dir() -> Path:
+    """Content-addressed journal snapshot store. Same pattern as system_prompts."""
+    return _root().parent / "journals"
+
+
+def ensure_journal_snapshot(journal_json: str) -> str:
+    """Content-address a journal JSON string. Returns sha. Idempotent.
+
+    Audit log entries reference this sha instead of inlining the full
+    journal — keeps log lines tiny even after many updates.
+    """
+    sha = hashlib.sha256(journal_json.encode("utf-8")).hexdigest()[:16]
+    try:
+        d = _journals_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{sha}.json"
+        if not path.exists():
+            path.write_text(journal_json, encoding="utf-8")
+    except Exception:
+        pass
+    return sha
+
+
+def read_journal_snapshot(sha: str) -> str | None:
+    try:
+        path = _journals_dir() / f"{sha}.json"
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return None
+
+
 def ensure_system_prompt(text: str) -> str:
     """Content-address `text`. Write it once under system_prompts/<sha>.txt.
     Return the sha. Idempotent. Never raises (returns sha even if write fails)."""
@@ -128,6 +161,41 @@ def append(
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         # Logging is best-effort. Swallow.
+        pass
+
+
+def append_journal_event(
+    *,
+    session_id: str,
+    action_index: int,
+    prior_journal_sha: str | None,
+    new_journal_sha: str | None,
+    diff_summary: list[str],
+    latency_ms: float | None,
+    error: str | None,
+    skipped_reason: str | None = None,
+) -> None:
+    """Append one journal-update event so the viewer can show how the
+    agent's worklist evolved. Same file as verdict / goal records;
+    differentiated by `type`."""
+    try:
+        root = _root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{session_id or 'unknown'}.jsonl"
+        record = {
+            "type": "journal_update",
+            "ts": time.time(),
+            "action_index": action_index,
+            "prior_journal_sha": prior_journal_sha,
+            "new_journal_sha": new_journal_sha,
+            "diff_summary": diff_summary,
+            "latency_ms": latency_ms,
+            "error": error,
+            "skipped_reason": skipped_reason,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
         pass
 
 

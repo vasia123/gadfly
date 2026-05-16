@@ -35,6 +35,7 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
         count = 0
         flagged = 0
         goal_events = 0
+        journal_events = 0
         latest_ts: float | None = None
         last_tool: str | None = None
         try:
@@ -57,6 +58,13 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                             latest_ts = ts
                             last_tool = "goal"
                         continue
+                    if rec_type == "journal_update":
+                        journal_events += 1
+                        ts = rec.get("ts")
+                        if isinstance(ts, (int, float)) and (latest_ts is None or ts > latest_ts):
+                            latest_ts = ts
+                            last_tool = "journal"
+                        continue
                     count += 1
                     if rec.get("verdict", {}).get("professional") is False:
                         flagged += 1
@@ -72,6 +80,7 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                 "count": count,
                 "flagged": flagged,
                 "goal_events": goal_events,
+                "journal_events": journal_events,
                 "latest_ts": latest_ts,
                 "last_tool": last_tool,
             }
@@ -167,6 +176,20 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_text(text)
             return
+        if path.startswith("/api/journal_snapshot/"):
+            sha = path[len("/api/journal_snapshot/"):]
+            text = audit_log.read_journal_snapshot(sha)
+            if text is None:
+                self._send_text("not found", status=404)
+                return
+            # Try to pretty-print JSON for readability; fall back to raw.
+            try:
+                parsed = json.loads(text)
+                pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
+                self._send_text(pretty, content_type="application/json; charset=utf-8")
+            except Exception:
+                self._send_text(text, content_type="application/json; charset=utf-8")
+            return
         self._send_text("not found", status=404)
 
 
@@ -220,6 +243,17 @@ _INDEX_HTML = r"""<!doctype html>
   .card.goal { border-color: #2c4a5a; background: #131a22; }
   .card.goal-err { border-color: #5a4a27; background: #131a22; }
   .card.goal .head .tool { color: #88b6d9; }
+  .card.journal { border-color: #3a4a32; background: #141a14; }
+  .card.journal-err { border-color: #5a4a27; background: #141a14; }
+  .card.journal .head .tool { color: #a4c98a; }
+  .journal-diff { padding: 10px 14px; }
+  .journal-diff .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .journal-diff ul { margin: 0; padding-left: 18px; }
+  .journal-diff li { font-size: 12.5px; line-height: 1.6; }
+  .journal-diff li.created { color: #6fcf97; }
+  .journal-diff li.dropped { color: var(--bad); }
+  .journal-diff li.status { color: var(--warn); }
+  .journal-skipped { padding: 8px 14px; color: var(--muted); font-size: 12px; font-style: italic; }
   .goal-block { padding: 12px 14px; }
   .goal-block .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
   .goal-block .body { font: 13px/1.5 -apple-system, sans-serif; white-space: pre-wrap; }
@@ -439,6 +473,7 @@ function renderRecords(records) {
     ? records.filter(r =>
         (r.verdict && r.verdict.professional === false)
         || (r.type === "goal_distill" && r.error)  // failed goal events stay visible
+        || (r.type === "journal_update" && (r.error || r.skipped_reason))
       )
     : records;
   const sig = JSON.stringify({sid: currentSession, flagged: flaggedOnly, list: visible, total: currentTotal, loaded: loadedCount});
@@ -454,6 +489,7 @@ function renderRecords(records) {
   const newestFirst = visible.slice().reverse();
   const cardsHtml = newestFirst.map(r => {
     if (r.type === "goal_distill") return renderGoalEvent(r);
+    if (r.type === "journal_update") return renderJournalEvent(r);
     const v = r.verdict || {};
     const pro = v.professional;
     const flagged = pro === false;
@@ -552,6 +588,79 @@ function renderGoalEvent(r) {
         </div>` : ''}
     </div>
   `;
+}
+
+function diffLineClass(line) {
+  if (!line) return "";
+  if (line.startsWith("created ")) return "created";
+  if (line.startsWith("dropped ")) return "dropped";
+  if (line.startsWith("poison:")) return "dropped";
+  if (line.startsWith("refused")) return "dropped";
+  if (line.includes("→") || line.includes(".flags ")) return "status";
+  return "";
+}
+
+function renderJournalEvent(r) {
+  const failed = !!r.error;
+  const skipped = !!r.skipped_reason;
+  const cls = failed ? "card journal-err" : "card journal";
+  let badge;
+  if (failed) {
+    badge = '<span class="badge warn">journal failed</span>';
+  } else if (skipped) {
+    badge = '<span class="badge" style="background:rgba(138,147,166,0.18);color:var(--muted);">journal skipped</span>';
+  } else {
+    badge = '<span class="badge" style="background:rgba(164,201,138,0.18);color:#a4c98a;">journal updated</span>';
+  }
+  const diff = Array.isArray(r.diff_summary) ? r.diff_summary : [];
+  const diffHtml = diff.length === 0
+    ? ''
+    : `
+      <div class="journal-diff">
+        <div class="label">changes</div>
+        <ul>
+          ${diff.map(d => `<li class="${diffLineClass(d)}">${escapeHtml(d)}</li>`).join('')}
+        </ul>
+      </div>`;
+  const skippedHtml = skipped && !failed
+    ? `<div class="journal-skipped">${escapeHtml(r.skipped_reason)}</div>`
+    : '';
+  const errHtml = failed
+    ? `<div class="verdict-msg error"><b>error:</b> ${escapeHtml(r.error)}</div>`
+    : '';
+  const newSha = r.new_journal_sha || '';
+  const priorSha = r.prior_journal_sha || '';
+  return `
+    <div class="${cls}">
+      <div class="head">
+        <span class="tool">journal #${r.action_index ?? '?'}</span>
+        ${badge}
+        <span class="ts">${fmtTs(r.ts)}</span>
+        <span class="lat">${fmtMs(r.latency_ms)}</span>
+      </div>
+      ${diffHtml}
+      ${skippedHtml}
+      ${errHtml}
+      ${newSha ? `
+        <details data-key="${detailKey(r, 'journal-new')}"${openAttr(r, 'journal-new')}>
+          <summary>journal after this update <span class="sysprompt-link">sha=${escapeHtml(newSha)}</span></summary>
+          <pre id="jn-${r.ts}"><button onclick="loadJournalSnap('${escapeHtml(newSha)}', 'jn-${r.ts}')">load</button></pre>
+        </details>` : ''}
+      ${priorSha ? `
+        <details data-key="${detailKey(r, 'journal-prior')}"${openAttr(r, 'journal-prior')}>
+          <summary>journal before this update <span class="sysprompt-link">sha=${escapeHtml(priorSha)}</span></summary>
+          <pre id="jp-${r.ts}"><button onclick="loadJournalSnap('${escapeHtml(priorSha)}', 'jp-${r.ts}')">load</button></pre>
+        </details>` : ''}
+    </div>
+  `;
+}
+
+async function loadJournalSnap(sha, targetId) {
+  if (!sha) return;
+  const r = await fetch("/api/journal_snapshot/" + encodeURIComponent(sha));
+  const text = await r.text();
+  const el = document.getElementById(targetId);
+  if (el) el.textContent = text;
 }
 
 async function loadSysPrompt(sha, targetId) {

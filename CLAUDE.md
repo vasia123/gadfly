@@ -20,23 +20,104 @@ exits non-zero and never breaks the host session.
 
 ```
 src/gadfly/
-  prompts.py    SYSTEM_PROMPT (the rubric) + build_user_message()
+  prompts.py    SYSTEM_PROMPT (legacy) + SYSTEM_PROMPT_JOURNAL (Phase 2;
+                adds journal-reader, repetition rule, rationalization
+                cross-check, drift guidance) + build_user_message —
+                switches to journal-mode rendering when a Journal is
+                passed.
   watchdog.py   evaluate_async / evaluate — one-shot Haiku call via
-                claude-agent-sdk + in-process MCP tool `submit_verdict`
-  session.py    Reads transcript_path JSONL, returns recent_user_requests
-                (up to 5, chronological), last_assistant_plan, recent_actions
-                (with mini-diffs of Edit/Write so prior series-edits are
-                visible)
+                claude-agent-sdk + in-process MCP tool `submit_verdict`.
+                Picks SYSTEM_PROMPT_JOURNAL when
+                GADFLY_JOURNAL_VERDICT=1 AND ctx.journal is set.
+  journal.py    Per-session journal (the agent's worklist as Haiku
+                understands it). Workstreams, statuses, flag history,
+                drift. update_for_action() runs ONE Haiku call per
+                hook. Persistence:
+                  ~/.claude/gadfly/journal/<session_id>.json (current)
+                  ~/.claude/gadfly/journals/<sha>.json (snapshots)
+                See "The journal" section below.
+  pairs.py      Pair / clean_user_text / extract_pairs — single source
+                of truth for transcript scrubbing.
+  goal.py       Legacy goal distillation. Phase 1 keeps it alongside
+                the journal; Phase 3 deletes it once journal proves
+                itself in production.
+  session.py    Reads transcript_path JSONL, returns SessionContext:
+                recent_user_requests (≤5, chronological),
+                last_assistant_plan, recent_actions, pairs (full
+                chronological list for journal), action_index, and
+                journal (populated by hook.py in Phase 2).
   hook.py       PostToolUse entrypoint. python -m gadfly.hook.
+                Runs journal.update_for_action() BEFORE
+                watchdog.evaluate(). GADFLY_JOURNAL=0 disables the
+                journal entirely; GADFLY_JOURNAL_VERDICT=1 makes the
+                verdict prompt consume the journal.
   verdict.py    Verdict dataclass + to_hook_output()
   log.py        Append-only JSONL audit log + content-addressed
-                system prompts under ~/.claude/gadfly/system_prompts/
-  viewer.py     stdlib-only local HTTP server + single-page HTML
+                system prompts AND journal snapshots under
+                ~/.claude/gadfly/{system_prompts,journals}/<sha>.
+                Record types: verdict, goal_distill, journal_update.
+  viewer.py     stdlib-only local HTTP server + single-page HTML.
+                Renders journal-update events with diff_summary + a
+                snapshot view via /api/journal_snapshot/<sha>.
 scripts/
-  probe.py      Live regression probe against real Haiku
-                (no mocks; bills the real subscription)
-tests/          37+ unit tests, all mock the SDK via DI
+  probe.py      Live regression probe against real Haiku (no mocks;
+                bills the real subscription). CASES A/B exercise the
+                legacy prompt; CASES C/D exercise the journal-aware
+                repetition rule (gated by GADFLY_JOURNAL_VERDICT=1).
+tests/          92+ unit tests, all mock the SDK via DI. test_live.py
+                is gated by GADFLY_LIVE=1 and covers Haiku integration
+                for verdict, goal, and journal flows.
 ```
+
+## The journal (Phase 1 default, Phase 2 opt-in)
+
+The watchdog used to be stateless per hook. Two failure modes drove the
+journal design (see also session 7fd6dce9-dcfa-41f9-aec9-105c5b8a54b7
+which is the canonical repro):
+
+1. **Edit-window blindness.** A series of 8+ Edits pushed prior code
+   changes out of the 5-action window, and a follow-up Write(MEMORY.md)
+   got flagged "claimed-as-landed but no Edits" — incorrectly.
+2. **Verdict echo chamber.** The watchdog has no memory of its own
+   verdicts, so the same flag fires 14 times on the same topic after
+   the agent already pushed back.
+
+The journal solves both by maintaining persistent state. It tracks:
+
+- root_goal (subsumes the goal.py distill)
+- workstreams: id, title, status, origin, notes, watchdog_flags,
+  flag_history (each entry carrying `agent_pushed_back`), last_touched
+- drift: initial_workstream_ids (baseline) + observations
+
+Update happens on every PostToolUse via a small Haiku call
+(update_journal MCP tool). Steady-state cost is one ~3s call —
+incremental: only NEW pairs + the latest action are fed.
+
+### Two phases, two env vars
+
+- `GADFLY_JOURNAL=1` (default): journal runs, but the verdict prompt
+  is the legacy `SYSTEM_PROMPT`. Use this for shadow-mode validation:
+  open the viewer, scroll the Journal cards, check workstreams match
+  what the agent was actually doing across several real sessions.
+- `GADFLY_JOURNAL_VERDICT=1` (opt-in, Phase 2): verdict prompt swaps
+  to `SYSTEM_PROMPT_JOURNAL`, watchdog reads the journal as primary
+  context. Includes the load-bearing repetition rule that solves the
+  echo chamber.
+
+### Poisoning guards
+
+- `prompt_sha` invalidates the disk cache when `UPDATE_SYSTEM_PROMPT`
+  changes — same pattern as goal cache.
+- The update is rejected (carry forward + log into
+  `drift.observations`) when it would drop >50% of workstreams or
+  rewrite root_goal radically WITHOUT a new user message to justify
+  it. A new user message lifts the guard.
+
+### Caps
+
+- `flag_history`: 8 most recent entries per workstream.
+- `MAX_NOTES_LEN = 1500`, `MAX_WORKSTREAMS = 20`.
+- If the workstream cap is hit, done/abandoned ones drop first.
 
 ## Architectural decisions — and why
 

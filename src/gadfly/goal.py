@@ -1,29 +1,26 @@
 """Distil the agent's *current goal* from the conversation trail.
 
-Why this exists
----------------
-A single raw user message rarely captures the goal of the work the agent
-is doing. People say "actually use criterion not bench harness" — that line
-alone is meaningless. To understand it you need the assistant's previous
-proposal it was replying to ("I'll use the cargo bench harness for Tier 2 …")
-plus the earlier user message that set the original objective ("design a
-benchmark plan that catches regressions before full e2e …"). Worse,
-transcripts contain junk we don't want feeding the watchdog: synthetic
-`[Request interrupted by user for tool use]` markers, exact duplicates
-when a user re-submits the same message, and tool_result wrappers.
+Pair extraction and service-tag scrubbing live in `pairs.py`; this module
+is now just the Haiku-distillation layer + per-session cache.
 
-So we extract *pairs* (preceding-assistant-text, user-text) walking the
-transcript chronologically, then ask Haiku once: "given the conversation
-so far, in one or two sentences — what is the agent supposed to be doing
-right now?". The answer is cached per session, keyed by the hash of the
-pairs already distilled, and grown incrementally: when a new user message
-appears, we feed Haiku (cached_goal, new_pairs) → new_goal. Between tool
-calls in the same turn nothing changes, so the cache is reused — which
-keeps the distillation cost roughly *per user message*, not per hook call.
+A single raw user message rarely captures the goal of the work the agent
+is doing. People say "actually use criterion not bench harness" — that
+line alone is meaningless. To understand it you need the assistant's
+previous proposal it was replying to, plus the earlier user message that
+set the original objective. So `pairs.extract_pairs` builds chronological
+(prev-assistant, user) pairs from the transcript, and `load_or_distill`
+asks Haiku once: "given the conversation so far, in one or two sentences
+— what is the agent supposed to be doing right now?". The answer is
+cached per session, keyed by the hash of the pairs already distilled,
+and grown incrementally as new user messages appear.
 
 Failure semantics — same as the rest of gadfly: any error returns None
 and is logged via the regular audit-log error field. Distillation is a
 quality boost, not a requirement.
+
+NOTE: Phase 3 of the journal migration deletes this module entirely
+(the journal carries `root_goal` natively). During Phase 1 it runs in
+parallel with the journal updater so we can compare outputs.
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -47,163 +43,24 @@ from claude_agent_sdk import (
 )
 
 from . import log as audit_log
-
-
-# --- Public types ------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Pair:
-    """One (preceding assistant text, user message) tuple."""
-
-    assistant_text: str | None
-    user_text: str
-
-    def to_cache_hash(self) -> str:
-        h = hashlib.sha256()
-        h.update((self.assistant_text or "").encode("utf-8"))
-        h.update(b"\x00")
-        h.update(self.user_text.encode("utf-8"))
-        return h.hexdigest()[:16]
+# Back-compat: existing callers (session.py, tests) import pair utilities
+# and the `Pair` dataclass from `gadfly.goal`. Keep those names alive here.
+from .pairs import (  # noqa: F401
+    Pair,
+    clean_user_text,
+    extract_pairs,
+    _JUNK_PATTERNS,
+    _STRIPPABLE_TAGS,
+)
 
 
 @dataclass
 class GoalState:
-    """What we know about the agent's goal in this session.
-
-    Returned to the watchdog so it can decide what to feed Haiku as context.
-    """
+    """What we know about the agent's goal in this session."""
 
     goal: str | None = None
-    # The raw pairs that have NOT yet been distilled into goal (e.g. when
-    # distillation failed or no API auth). The watchdog can fall back to
-    # showing these as-is.
     raw_pairs: list[Pair] | None = None
     error: str | None = None
-
-
-# --- Pair extraction ---------------------------------------------------------
-
-
-_JUNK_PATTERNS = (
-    "[Request interrupted by user for tool use]",
-    "[Request interrupted by user]",
-)
-
-# Tags that Claude Code injects into the user-role content stream but that
-# are NOT real user intent. We strip them before deciding whether the
-# message has any signal left. Single source of truth — also used by
-# session.py to filter recent_user_requests.
-_STRIPPABLE_TAGS = (
-    "system-reminder",
-    "command-name",
-    "command-message",
-    "command-args",
-    "local-command-stdout",
-    "local-command-stderr",
-    "local-command-caveat",
-    "task-notification",
-)
-
-_TAG_BLOCK_RE = re.compile(
-    r"<(" + "|".join(_STRIPPABLE_TAGS) + r")\b[^>]*>.*?</\1>",
-    re.DOTALL | re.IGNORECASE,
-)
-
-
-def clean_user_text(text: str) -> str | None:
-    """Strip Claude-Code-injected service tags from a user message.
-
-    Returns the cleaned text, or None when nothing meaningful is left
-    (the whole message was just service tags / interrupt markers /
-    whitespace). Used by both pair extraction and recent_user_requests
-    collection so the watchdog never sees service noise as "user intent".
-    """
-    if not isinstance(text, str):
-        return None
-    cleaned = _TAG_BLOCK_RE.sub("", text)
-    cleaned = cleaned.strip()
-    if not cleaned:
-        return None
-    if any(p in cleaned for p in _JUNK_PATTERNS):
-        # Synthetic interrupt markers — drop the whole message even if
-        # something else got concatenated. In practice these arrive alone.
-        without_markers = cleaned
-        for p in _JUNK_PATTERNS:
-            without_markers = without_markers.replace(p, "")
-        without_markers = without_markers.strip()
-        if not without_markers:
-            return None
-        cleaned = without_markers
-    return cleaned
-
-
-def _extract_text_block(content: Any) -> str | None:
-    if isinstance(content, str):
-        return content.strip() or None
-    if isinstance(content, list):
-        chunks: list[str] = []
-        for b in content:
-            if isinstance(b, dict) and b.get("type") == "text":
-                t = b.get("text")
-                if isinstance(t, str) and t.strip():
-                    chunks.append(t.strip())
-        if chunks:
-            return "\n".join(chunks)
-    return None
-
-
-def _is_pure_tool_result(content: Any) -> bool:
-    return isinstance(content, list) and all(
-        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
-    )
-
-
-def extract_pairs(entries: list[dict[str, Any]]) -> list[Pair]:
-    """Walk transcript entries chronologically, build (prev_assistant, user) pairs.
-
-    - Skips synthetic tool_result-only user messages.
-    - Skips `[Request interrupted by user for tool use]` markers.
-    - De-duplicates exact-repeat user texts in a row (e.g. when the user
-      hits resend after a slow turn).
-    """
-    pairs: list[Pair] = []
-    last_assistant_text: str | None = None
-    last_user_text: str | None = None
-
-    for entry in entries:
-        msg = entry.get("message") if isinstance(entry, dict) else None
-        if not isinstance(msg, dict):
-            continue
-        role = msg.get("role")
-        content = msg.get("content")
-
-        if role == "assistant":
-            text = _extract_text_block(content)
-            if text:
-                last_assistant_text = text
-            continue
-
-        if role == "user":
-            if _is_pure_tool_result(content):
-                continue
-            text = _extract_text_block(content)
-            if text is None:
-                continue
-            text = clean_user_text(text)
-            if text is None:
-                continue
-            if text == last_user_text:
-                # Exact duplicate (resend) — skip.
-                continue
-            pairs.append(Pair(assistant_text=last_assistant_text, user_text=text))
-            last_user_text = text
-            # Once consumed, assistant context belongs to this pair; the
-            # next pair should pair with whatever assistant text comes
-            # next, not re-use this one.
-            last_assistant_text = None
-
-    return pairs
 
 
 # --- Cache -------------------------------------------------------------------
@@ -224,13 +81,8 @@ def _cache_path(session_id: str) -> Path:
 @dataclass
 class _CacheEntry:
     goal: str
-    pair_hashes: list[str]  # in order — corresponds to the pairs we have
-    # already distilled into goal
+    pair_hashes: list[str]
     ts: float
-    # SHA prefix of the SYSTEM_PROMPT used when this cache entry was
-    # produced. When the prompt is tightened in code, we want the cache
-    # to invalidate automatically — otherwise the user keeps seeing stale
-    # distilled goals built by an older rubric.
     prompt_sha: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -255,11 +107,6 @@ def _load_cache(session_id: str) -> _CacheEntry | None:
         prompt_sha = data.get("prompt_sha") or ""
         if not isinstance(goal, str) or not isinstance(hashes, list):
             return None
-        # Invalidate when the SYSTEM_PROMPT has been edited since this
-        # entry was produced — the calibration may have changed
-        # substantively (e.g. new "unresolved-problem priority" rule)
-        # and we want the next distillation to apply the current rubric
-        # from scratch rather than build on the old understanding.
         if prompt_sha and prompt_sha != _system_prompt_sha():
             return None
         return _CacheEntry(
@@ -394,14 +241,8 @@ def _build_options(captured: _Captured, model: str) -> ClaudeAgentOptions:
         allowed_tools=["mcp__gadfly_goal__submit_goal"],
         permission_mode="bypassPermissions",
         setting_sources=[],
-        # See watchdog._build_options — empty `settings="{}"` is the
-        # actual recursion guard (`hooks={}` was a no-op because the SDK
-        # does not propagate it to the inner CLI).
         settings="{}",
-        # See watchdog._build_options for the TypedDict caveat — `type=` kwarg
-        # is mandatory or the SDK errors with `KeyError('type')`.
         thinking=ThinkingConfigDisabled(type="disabled"),
-        # max_turns=2: turn 1 emits submit_goal, turn 2 closes out.
         max_turns=2,
         env={"GADFLY_INTERNAL": "1"},
     )
@@ -427,7 +268,6 @@ async def _distill_async(
     timeout_s: float = DEFAULT_TIMEOUT_S,
     run_query: RunQuery = _default_run_query,
 ) -> tuple[str | None, str | None]:
-    """Return (goal, error_or_none)."""
     captured = _Captured()
     options = _build_options(captured, model)
     prompt = _build_user_prompt(prior_goal, pairs)
@@ -455,22 +295,13 @@ def load_or_distill(
     model: str = DEFAULT_MODEL,
     timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> GoalState:
-    """Return the current goal state for this session.
-
-    Uses the cache when nothing has changed; runs incremental distillation
-    when one or more new pairs have appeared. Falls back gracefully when
-    distillation isn't available (returns raw_pairs so the caller can still
-    show them as fallback context).
-    """
+    """Return the current goal state for this session."""
     if not pairs:
         return GoalState(goal=None, raw_pairs=[], error=None)
 
     cache = _load_cache(session_id)
     pair_hashes = [p.to_cache_hash() for p in pairs]
 
-    # Identify how many leading pairs match the cache. If the cache prefix
-    # doesn't match (e.g. transcript was rewritten / forked), invalidate
-    # entirely.
     consumed = 0
     if cache:
         prefix = cache.pair_hashes
@@ -484,8 +315,6 @@ def load_or_distill(
 
     new_pairs = pairs[consumed:]
     if cache and not new_pairs:
-        # Nothing new — return cached goal verbatim. Don't log: a no-op
-        # cache hit on every PostToolUse would flood the audit log.
         return GoalState(goal=cache.goal, raw_pairs=[], error=None)
 
     prior_goal = cache.goal if cache else None
@@ -521,8 +350,6 @@ def load_or_distill(
     latency_ms = (time.perf_counter() - t0) * 1000
 
     if goal is None:
-        # Distillation failed — fall back to cached goal (if any) and the
-        # raw new pairs so the watchdog still gets *some* context.
         audit_log.append_goal_event(
             session_id=session_id,
             pairs_total=len(pairs),

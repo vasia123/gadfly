@@ -27,6 +27,7 @@ Two safety properties we must preserve at all costs:
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -43,10 +44,19 @@ from .prompts import (
     SUBMIT_VERDICT_DESCRIPTION,
     SUBMIT_VERDICT_INPUT_SCHEMA,
     SYSTEM_PROMPT,
+    SYSTEM_PROMPT_JOURNAL,
     build_user_message,
 )
 from .session import SessionContext
 from .verdict import Verdict
+
+
+def _select_system_prompt(use_journal: bool) -> str:
+    """Phase 2 default. `GADFLY_JOURNAL_VERDICT=0` rolls back to the
+    legacy verdict prompt (Phase 1 shadow mode)."""
+    if use_journal and os.environ.get("GADFLY_JOURNAL_VERDICT", "1") != "0":
+        return SYSTEM_PROMPT_JOURNAL
+    return SYSTEM_PROMPT
 
 DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_TIMEOUT_S = 60.0  # CLI cold start ~10s first time, ~2-3s warm; Haiku adds 1-3s
@@ -79,7 +89,7 @@ def _build_submit_verdict_tool(captured: _Captured):
     return submit_verdict
 
 
-def _build_options(captured: _Captured, model: str) -> ClaudeAgentOptions:
+def _build_options(captured: _Captured, model: str, system_prompt: str = SYSTEM_PROMPT) -> ClaudeAgentOptions:
     server = create_sdk_mcp_server(
         "gadfly",
         "1.0.0",
@@ -87,7 +97,7 @@ def _build_options(captured: _Captured, model: str) -> ClaudeAgentOptions:
     )
     return ClaudeAgentOptions(
         model=model,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         mcp_servers={"gadfly": server},
         allowed_tools=["mcp__gadfly__submit_verdict"],
         permission_mode="bypassPermissions",
@@ -136,7 +146,15 @@ async def evaluate_async(
     run_query: RunQuery = _default_run_query,
 ) -> EvaluationResult:
     captured = _Captured()
-    options = _build_options(captured, model)
+    # Phase 2 is the default — verdict reads the journal when one is
+    # supplied. Rollback to Phase 1 (legacy prompt) by setting
+    # GADFLY_JOURNAL_VERDICT=0.
+    use_journal = (
+        context.journal is not None
+        and os.environ.get("GADFLY_JOURNAL_VERDICT", "1") != "0"
+    )
+    system_prompt = _select_system_prompt(use_journal)
+    options = _build_options(captured, model, system_prompt=system_prompt)
     user_message = build_user_message(
         tool_name=tool_name,
         tool_input=tool_input,
@@ -145,8 +163,9 @@ async def evaluate_async(
         last_assistant_plan=context.last_assistant_plan,
         recent_actions=context.recent_actions,
         distilled_goal=context.distilled_goal,
+        journal=context.journal if use_journal else None,
     )
-    system_prompt_sha = audit_log.ensure_system_prompt(SYSTEM_PROMPT)
+    system_prompt_sha = audit_log.ensure_system_prompt(system_prompt)
 
     def _result(verdict: Verdict, error: str | None) -> EvaluationResult:
         return EvaluationResult(
