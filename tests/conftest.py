@@ -33,3 +33,6 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # neutralise both flags so behaviour is unambiguous: tests that
     # exercise journal flow opt in explicitly.
     monkeypatch.setenv("GADFLY_JOURNAL_VERDICT", "0")
+    # Phase-B (historian priors) default-on in production. Off in
+    # unit tests so prompts don't get unexpected priors blocks.
+    monkeypatch.setenv("GADFLY_HISTORIAN_PRIORS", "0")

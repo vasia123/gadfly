@@ -164,6 +164,37 @@ def append(
         pass
 
 
+def append_historian_event(
+    *,
+    session_id: str,
+    cwd: str,
+    chunks: int,
+    findings_counts: dict[str, int],
+    latency_ms: float | None,
+    error: str | None,
+) -> None:
+    """Append one historian session-digest event. Recorded under the
+    session_id (same file as the verdict log) so the viewer can show
+    'this session was digested at T, producing N findings'."""
+    try:
+        root = _root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{session_id or 'unknown'}.jsonl"
+        record = {
+            "type": "historian_digest",
+            "ts": time.time(),
+            "cwd": cwd,
+            "chunks": chunks,
+            "findings_counts": dict(findings_counts),
+            "latency_ms": latency_ms,
+            "error": error,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def append_journal_event(
     *,
     session_id: str,

@@ -26,7 +26,9 @@ import pytest
 from gadfly.session import SessionContext
 from gadfly.watchdog import evaluate
 from gadfly import goal as goal_mod
+from gadfly import historian as historian_mod
 from gadfly import journal as journal_mod
+from gadfly import project_state as project_state_mod
 from gadfly.pairs import Pair
 
 
@@ -258,3 +260,126 @@ def test_goal_distillation_completes_against_real_haiku(tmp_path, monkeypatch):
         marker in goal_lower
         for marker in ("benchmark", "criterion", "regression", "rust")
     ), f"goal lost key nouns from the conversation: {state.goal!r}"
+
+
+# --- Historian (Phase A + B) -----------------------------------------------
+
+
+_HISTORIAN_FIXTURE_TRANSCRIPT = [
+    # User asks for a real feature that produces durable findings.
+    {"message": {"role": "user", "content": (
+        "we should add a tiered benchmark framework that catches "
+        "performance regressions at kernel, layer, and chain levels"
+    )}},
+    {"message": {"role": "assistant", "content": [
+        {"type": "text", "text":
+            "I'll plan it out. I'll start with criterion-based kernel "
+            "benches (Tier 1), then layer-level (Tier 2), then chain "
+            "(Tier 3). TODO: documentation of how to read the bench "
+            "outputs will be a follow-up."},
+    ]}},
+    {"message": {"role": "user", "content": (
+        "good. always run cargo fmt before any commit in this repo — "
+        "we got bit last time by an unformatted commit"
+    )}},
+    {"message": {"role": "assistant", "content": [
+        {"type": "text", "text":
+            "Acknowledged: cargo fmt before each commit. Adding kernel "
+            "bench scaffolding now."},
+        {"type": "tool_use", "name": "Edit", "input": {
+            "file_path": "benches/kernel_bench.rs",
+            "old_string": "", "new_string": "// stub kernel bench"
+        }},
+        {"type": "tool_use", "name": "Edit", "input": {
+            "file_path": "benches/layer_bench.rs",
+            "old_string": "", "new_string": "// stub layer bench"
+        }},
+        {"type": "tool_use", "name": "Edit", "input": {
+            "file_path": "benches/chain_bench.rs",
+            "old_string": "", "new_string": "// stub chain bench"
+        }},
+    ]}},
+]
+
+
+def _write_fixture_transcript(path):
+    import json as _json
+    with path.open("w") as f:
+        for e in _HISTORIAN_FIXTURE_TRANSCRIPT:
+            f.write(_json.dumps(e) + "\n")
+
+
+@live
+def test_historian_distill_extracts_findings_from_fixture(tmp_path, monkeypatch):
+    """Smoke: a single small but content-rich transcript produces at
+    least one finding. If the SDK or prompt regresses (e.g. KeyError on
+    ThinkingConfigDisabled, prompt too aggressive about empty lists),
+    this catches it."""
+    monkeypatch.setenv("GADFLY_LOG_DIR", str(tmp_path / "log"))
+    tp = tmp_path / "session-fixture.jsonl"
+    _write_fixture_transcript(tp)
+
+    res = historian_mod.distill_session(
+        cwd="/proj/live-test",
+        session_id="session-fixture",
+        transcript_path=tp,
+        transcript_mtime=tp.stat().st_mtime,
+    )
+    assert res.error is None, f"distill failed: {res.error}"
+    d = res.raw_digest
+    total = (
+        len(d["new_promises"])
+        + len(d["new_corrections"])
+        + len(d["knowledge_updates"])
+    )
+    assert total >= 1, (
+        f"expected ≥1 finding from a content-rich transcript, got: "
+        f"promises={len(d['new_promises'])}, "
+        f"corrections={len(d['new_corrections'])}, "
+        f"knowledge={len(d['knowledge_updates'])}"
+    )
+    # Every finding must carry an evidence_quote (anti-hallucination).
+    for key in ("new_promises", "new_corrections", "knowledge_updates"):
+        for item in d[key]:
+            assert item.get("evidence_quote"), (
+                f"{key} item missing evidence_quote: {item}"
+            )
+
+
+@live
+def test_historian_retrieval_surfaces_seeded_finding(tmp_path, monkeypatch):
+    """Phase B retrieval: after digesting the fixture, query for a topic
+    we KNOW is in the corpus and verify the top hit matches.
+
+    This is the MemoryArena-style active-use validation: storage isn't
+    enough, retrieval must surface the right thing at the right moment.
+    """
+    monkeypatch.setenv("GADFLY_LOG_DIR", str(tmp_path / "log"))
+    tp = tmp_path / "session-fixture.jsonl"
+    _write_fixture_transcript(tp)
+
+    cwd = "/proj/retrieval-live"
+    res = historian_mod.distill_session(
+        cwd=cwd,
+        session_id="session-fixture",
+        transcript_path=tp,
+        transcript_mtime=tp.stat().st_mtime,
+    )
+    assert res.error is None
+    # Re-aggregate so retrieval sees a fresh state.
+    state = project_state_mod.rebuild_from_raw(cwd)
+    project_state_mod.save_state(state)
+
+    hits = historian_mod.find_relevant_priors(
+        cwd,
+        workstream_title="add benchmark coverage for kernel performance",
+        file_paths=["benches/kernel_bench.rs"],
+    )
+    assert hits, "retrieval returned nothing for a query that should match"
+    # The top hit should be related to benchmarking / kernels.
+    top = hits[0]
+    haystack = (top.title + " " + top.body).lower()
+    assert any(
+        m in haystack
+        for m in ("bench", "kernel", "tier", "criterion", "performance")
+    ), f"top hit unrelated to the query: {top!r}"

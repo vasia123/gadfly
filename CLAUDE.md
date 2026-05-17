@@ -38,6 +38,30 @@ src/gadfly/
                 See "The journal" section below.
   pairs.py      Pair / clean_user_text / extract_pairs — single source
                 of truth for transcript scrubbing.
+  project_state.py
+                Per-cwd semantic memory: Promise / Correction / Subsystem
+                dataclasses, content-addressed cwd encoding (mirrors
+                Claude Code's ~/.claude/projects/<encoded>/ layout),
+                deterministic re-aggregator. NO Haiku calls — pure
+                aggregation. `rebuild_from_raw()` reconstructs semantic
+                state from raw episodic alone, byte-identical across
+                runs (drift-resistance invariant).
+  historian.py  Cross-session "project memory" daemon. Mines every
+                jsonl transcript in a cwd's projects/ dir, extracts
+                durable findings (promises, corrections, subsystems)
+                via one Haiku call per session (extract_findings MCP
+                tool), persists to:
+                  ~/.claude/gadfly/project/<encoded>/state.json
+                  ~/.claude/gadfly/project/<encoded>/raw/<sid>.json
+                CLI: python -m gadfly.historian {status,sweep,watch,
+                backfill,rebuild,propose-claudemd}. Triggered by
+                heartbeat files the hook writes after each PostToolUse;
+                a session is "done" after 5 min of no heartbeat.
+                Retrieval: find_relevant_priors() — keyword + file-path
+                overlap + outcomes-feedback usefulness; top-5 priors
+                injected into journal-maintainer prompt as a
+                "project_priors" block when GADFLY_HISTORIAN_PRIORS=1
+                (default). See "The historian" section below.
   goal.py       Legacy goal distillation. Phase 1 keeps it alongside
                 the journal; Phase 3 deletes it once journal proves
                 itself in production.
@@ -48,14 +72,17 @@ src/gadfly/
                 journal (populated by hook.py in Phase 2).
   hook.py       PostToolUse entrypoint. python -m gadfly.hook.
                 Runs journal.update_for_action() BEFORE
-                watchdog.evaluate(). GADFLY_JOURNAL=0 disables the
-                journal entirely; GADFLY_JOURNAL_VERDICT=1 makes the
-                verdict prompt consume the journal.
+                watchdog.evaluate(), then writes a heartbeat for the
+                historian. GADFLY_JOURNAL=0 disables the journal;
+                GADFLY_JOURNAL_VERDICT=0 rolls back to legacy verdict
+                prompt; GADFLY_HISTORIAN=0 disables heartbeats;
+                GADFLY_HISTORIAN_PRIORS=0 disables priors injection.
   verdict.py    Verdict dataclass + to_hook_output()
   log.py        Append-only JSONL audit log + content-addressed
                 system prompts AND journal snapshots under
                 ~/.claude/gadfly/{system_prompts,journals}/<sha>.
-                Record types: verdict, goal_distill, journal_update.
+                Record types: verdict, goal_distill, journal_update,
+                historian_digest.
   viewer.py     stdlib-only local HTTP server + single-page HTML.
                 Renders journal-update events with diff_summary + a
                 snapshot view via /api/journal_snapshot/<sha>.
@@ -118,6 +145,84 @@ incremental: only NEW pairs + the latest action are fed.
 - `flag_history`: 8 most recent entries per workstream.
 - `MAX_NOTES_LEN = 1500`, `MAX_WORKSTREAMS = 20`.
 - If the workstream cap is hit, done/abandoned ones drop first.
+
+## The historian (Phase A+B default, Phase C/D opt-in)
+
+The journal lives **within** a session. The historian lives **across**
+sessions. Every cwd accumulates a corpus of jsonl transcripts under
+`~/.claude/projects/<cwd-encoded>/`; the historian mines that corpus
+for durable findings the next session can build on.
+
+Aligned with 2026 agent-memory literature (MemMachine, mem0,
+MemoryArena, Reflexion, MemoryGraft):
+
+- **Episodic memory** = `raw/<sid>.json` per-session digests, verbatim
+  source of truth. Never overwritten. Aggregator NEVER re-reads its
+  own previous output — semantic state is fully re-derivable from
+  episodic alone (the drift-resistance invariant).
+- **Semantic memory** = `promises.json`, `corrections.json`,
+  `subsystems.json` derived from episodic. Three classes:
+    - Promise — agent committed to follow-up work; tracks landing.
+    - Correction — durable user feedback. Needs ≥2 sessions to leave
+      quarantine.
+    - Subsystem — knowledge-graph node (group of files + purpose).
+      Needs ≥3 distinct file mentions.
+- **Provenance + quarantine + revocation** — defends against
+  MemoryGraft-style poisoning. Every finding carries
+  `source_session`, `source_action_index`, `evidence_quote` ≤200c
+  verbatim. Single-shot findings stay in quarantine until repetition
+  threshold is met. `revoked.json` is an audit-only soft-delete.
+
+### Trigger model
+
+The hook (PostToolUse) writes a heartbeat at
+`~/.claude/gadfly/heartbeat/<cwd-encoded>.tick` after each watched
+tool call. **The historian is NEVER on the hot path** — heartbeat
+write is atomic-rename, <5ms, swallowed-exceptions.
+
+A separate daemon (`python -m gadfly.historian watch`) polls
+heartbeats every 60s. A session is "done" when no heartbeat has
+arrived in 5 min; then it gets digested. **Daemon is not
+auto-started.** Run it manually (`watch`), or one-shot via `sweep`,
+or backfill via `backfill <cwd> --yes-i-know-the-cost`.
+
+### CLI
+
+`python -m gadfly.historian` subcommands:
+- `status` — per-cwd corpus summary
+- `sweep` — one-shot: digest any sessions that are done + undigested
+- `watch` — long-running poll loop
+- `backfill <cwd> --yes-i-know-the-cost` — digest ALL prior sessions
+  in a cwd (1789 Haiku calls for vllm-rust corpus — expensive)
+- `rebuild <cwd>` — re-derive semantic state from existing raw/
+  digests. **No Haiku calls.** Cheap drift recovery.
+- `propose-claudemd <cwd>` — print candidate CLAUDE.md addition from
+  high-confidence corrections + subsystems. Never auto-applies.
+
+### Phase B — priors injection (default-on)
+
+When the journal maintainer opens a new workstream, the hook calls
+`historian.find_relevant_priors(workstream_title, file_paths)` and
+injects the top-5 hits into the maintainer prompt as a
+"Project priors" block. Retrieval signals (fused):
+1. keyword overlap (title vs. promise/correction/subsystem titles)
+2. file-path overlap (workstream's edited file vs. subsystem.files)
+3. usefulness_score (outcomes-feedback bonus)
+
+Default: ON. `GADFLY_HISTORIAN_PRIORS=0` rolls back.
+
+### Phases roadmap
+
+- **Phase A (default-on):** historian + storage + daemon + viewer.
+  Validated on real corpus (gadfly project, 15 sessions, real Haiku).
+- **Phase B (default-on):** priors injected into journal maintainer.
+  Validated end-to-end against real corpus (top-1 retrieval
+  precision = correct).
+- **Phase C (NOT yet implemented):** additionalContext injection on
+  workstream-creation events, so the agent (not just the watchdog)
+  sees priors. Risk: false positives → noise. Wait for real-session
+  evidence before enabling.
+- **Phase D:** `propose-claudemd` CLI — read-only, ships.
 
 ## Architectural decisions — and why
 

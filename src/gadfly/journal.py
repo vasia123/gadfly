@@ -111,6 +111,15 @@ class Workstream:
     watchdog_flags: int = 0
     flag_history: list[FlagEvent] = field(default_factory=list)
     last_touched: int = 0
+    # Phase B/outcomes-feedback: provenance-tagged ids of priors shown to
+    # this workstream's maintainer prompt. Format: "<kind>:<id>"
+    # (e.g. "correction:c-abc123"). Used at workstream-close time to
+    # increment/decrement usefulness_score of the project-state entries.
+    priors_consulted: list[str] = field(default_factory=list)
+    # Set when outcomes-feedback has fired for this workstream — guards
+    # against double-counting if the journal is re-saved / aggregator
+    # re-runs.
+    priors_scored: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -122,6 +131,8 @@ class Workstream:
             "watchdog_flags": self.watchdog_flags,
             "flag_history": [f.to_dict() for f in self.flag_history],
             "last_touched": self.last_touched,
+            "priors_consulted": list(self.priors_consulted),
+            "priors_scored": self.priors_scored,
         }
 
     @classmethod
@@ -137,6 +148,10 @@ class Workstream:
             watchdog_flags=int(d.get("watchdog_flags") or 0),
             flag_history=flag_history,
             last_touched=int(d.get("last_touched") or 0),
+            priors_consulted=[
+                str(p) for p in (d.get("priors_consulted") or []) if isinstance(p, str)
+            ],
+            priors_scored=bool(d.get("priors_scored") or False),
         )
 
 
@@ -470,6 +485,7 @@ def build_update_user_message(
     action_summary: str | None,
     assistant_reasoning: str | None,
     new_flag_events: list[FlagEvent] | None = None,
+    project_priors_block: str = "",
 ) -> str:
     """Assemble the maintainer prompt.
 
@@ -489,6 +505,13 @@ def build_update_user_message(
         flag_history. The maintainer assigns them by id.
     """
     parts: list[str] = [_render_journal_block(journal)]
+
+    # Phase B: durable findings from past sessions in this cwd, retrieved
+    # by historian.find_relevant_priors. Goes ABOVE new pairs so the
+    # maintainer can use them when titling new workstreams (avoiding
+    # title-drift between sessions on the same topic).
+    if project_priors_block:
+        parts.append(project_priors_block)
 
     if new_pairs:
         parts.append("## New conversation pairs since last update")
@@ -644,6 +667,12 @@ class JournalUpdateResult:
     skipped_reason: str | None
     latency_ms: float
     diff: list[str]
+    # Phase B/C: priors that were retrieved and shown to the maintainer.
+    # The hook reads this to decide whether to also surface them as
+    # additionalContext to the AGENT (Phase C) when a new workstream
+    # was created in this update. Empty list when priors weren't
+    # consulted (Phase B off, no cwd, or no relevant findings).
+    priors_consulted: list[Any] = field(default_factory=list)
 
 
 async def _update_async(
@@ -669,6 +698,102 @@ async def _update_async(
     return captured.payload, None
 
 
+_CLOSED_STATUSES = {"done", "abandoned"}
+
+
+def _apply_outcomes_feedback(*, cwd: str, base: Journal, candidate: Journal) -> None:
+    """When a workstream just closed and had priors_consulted, score the
+    referenced project_state entries against the workstream's final
+    notes. Mentioned priors get +1 usefulness_score; ignored ones get -1.
+
+    MemoryArena lesson: the hard part of memory is the retrieval-vs-use
+    gap. The score nudges Phase B retrieval toward priors that the
+    agent actually leans on, away from priors that surface and get
+    ignored. Single signal per workstream-close — bounded growth.
+    """
+    from . import project_state as ps
+
+    base_status = {w.id: w.status for w in base.workstreams}
+    state_loaded = False
+    state: ps.ProjectState | None = None
+
+    for w in candidate.workstreams:
+        if w.priors_scored:
+            continue
+        if w.status not in _CLOSED_STATUSES:
+            continue
+        was = base_status.get(w.id)
+        if was in _CLOSED_STATUSES:
+            # Already closed before this update — don't re-score.
+            continue
+        if not w.priors_consulted:
+            w.priors_scored = True
+            continue
+        # Lazy-load project state — we only need it if there's actual work.
+        if not state_loaded:
+            state = ps.load_state(cwd)
+            state_loaded = True
+        if state is None:
+            return
+        notes_lower = (w.notes or "").lower()
+        for tagged_id in w.priors_consulted:
+            kind, _, fid = tagged_id.partition(":")
+            if not fid:
+                continue
+            entry = None
+            container_label = ""
+            if kind == "promise":
+                entry = state.promises.get(fid)
+                container_label = "promise"
+            elif kind == "correction":
+                entry = state.corrections.get(fid)
+                container_label = "correction"
+            elif kind == "subsystem":
+                entry = state.subsystems.get(fid)
+                container_label = "subsystem"
+            if entry is None:
+                continue
+            # Match by title token-overlap rather than substring — titles
+            # often paraphrase, and substring would miss "auth" vs.
+            # "authentication". A single shared salient token is enough
+            # to count as "mentioned".
+            title = getattr(entry, "title", None) or getattr(entry, "rule", "")
+            mentioned = _title_appears_in_notes(title, notes_lower)
+            delta = 1 if mentioned else -1
+            current = getattr(entry, "usefulness_score", 0)
+            new = max(-5, min(10, current + delta))
+            setattr(entry, "usefulness_score", new)
+            _ = container_label  # currently unused, kept for future audit
+        w.priors_scored = True
+
+    if state is not None:
+        ps.save_state(state)
+
+
+def _title_appears_in_notes(title: str, notes_lower: str) -> bool:
+    """Token-overlap match. Used to detect whether a prior's title is
+    referenced in the workstream's final notes. Stop-words ignored."""
+    if not title or not notes_lower:
+        return False
+    stop = {
+        "the", "a", "an", "and", "or", "of", "in", "to", "for", "on",
+        "with", "is", "are", "was", "were", "be", "been", "by", "as",
+        "at", "from", "this", "that", "these", "those", "it", "its",
+    }
+    import re as _re
+
+    tokens = {
+        t for t in _re.split(r"[^A-Za-z0-9_]+", title.lower())
+        if len(t) >= 3 and t not in stop
+    }
+    if not tokens:
+        return False
+    # At least 2 distinct salient tokens (or 1 if title only has 1)
+    # must appear in notes.
+    hits = sum(1 for t in tokens if t in notes_lower)
+    return hits >= min(2, len(tokens))
+
+
 def update_for_action(
     *,
     session_id: str,
@@ -680,6 +805,8 @@ def update_for_action(
     model: str = DEFAULT_MODEL,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     run_query: RunQuery = _default_run_query,
+    cwd: str | None = None,
+    workstream_hint_files: list[str] | None = None,
 ) -> JournalUpdateResult:
     """Run one journal update for the given action / new user pairs.
 
@@ -710,12 +837,45 @@ def update_for_action(
         )
         return JournalUpdateResult(journal=base, error=None, skipped_reason="no_change", latency_ms=0.0, diff=[])
 
+    # Phase B (default-on): retrieve project priors from the historian
+    # corpus and inject. Rollback to Phase A (no priors) by setting
+    # GADFLY_HISTORIAN_PRIORS=0. Late import to avoid loading historian
+    # transitively in environments where the feature is fully off.
+    priors_block = ""
+    priors_hits: list[Any] = []
+    if (
+        cwd
+        and os.environ.get("GADFLY_HISTORIAN_PRIORS", "1") != "0"
+        and (new_pairs or new_flag_events or action_summary)
+    ):
+        try:
+            from . import historian as _historian
+
+            # Best-effort title for retrieval: the latest user message
+            # we just received, or the latest assistant reasoning.
+            title = ""
+            if new_pairs:
+                title = new_pairs[-1].user_text[:200]
+            elif assistant_reasoning:
+                title = assistant_reasoning[:200]
+            priors_hits = _historian.find_relevant_priors(
+                cwd,
+                workstream_title=title,
+                file_paths=workstream_hint_files or [],
+            )
+            priors_block = _historian.render_priors_block(priors_hits)
+        except Exception:
+            # Priors are a quality boost, not a requirement. Stay silent.
+            priors_block = ""
+            priors_hits = []
+
     prompt = build_update_user_message(
         journal=base,
         new_pairs=new_pairs,
         action_summary=action_summary,
         assistant_reasoning=assistant_reasoning,
         new_flag_events=new_flag_events,
+        project_priors_block=priors_block,
     )
 
     t0 = time.perf_counter()
@@ -771,6 +931,30 @@ def update_for_action(
     ):
         candidate.drift.initial_workstream_ids = [w.id for w in candidate.workstreams]
 
+    # Outcomes-feedback prep: stamp newly-created workstreams with the
+    # priors that were retrieved this turn. Carry forward existing
+    # priors_consulted / priors_scored on workstreams that already had
+    # them (Haiku's payload doesn't repeat these fields).
+    base_ws_by_id = {w.id: w for w in base.workstreams}
+    if priors_hits:
+        for w in candidate.workstreams:
+            existing = base_ws_by_id.get(w.id)
+            if existing is None:
+                # Brand new workstream → it's the one we showed priors to.
+                w.priors_consulted = [
+                    f"{getattr(h, 'kind', '?')}:{getattr(h, 'id', '?')}"
+                    for h in priors_hits
+                ]
+            else:
+                w.priors_consulted = list(existing.priors_consulted)
+                w.priors_scored = existing.priors_scored
+    else:
+        for w in candidate.workstreams:
+            existing = base_ws_by_id.get(w.id)
+            if existing is not None:
+                w.priors_consulted = list(existing.priors_consulted)
+                w.priors_scored = existing.priors_scored
+
     # Poisoning guard.
     poison = _is_poisonous_update(base, candidate, had_new_user_msg=had_new_user_msg)
     if poison:
@@ -796,6 +980,17 @@ def update_for_action(
         )
         return JournalUpdateResult(journal=carried, error=None, skipped_reason=poison, latency_ms=latency_ms, diff=[f"poison: {poison}"])
 
+    # Outcomes-feedback: detect workstreams that just closed (status →
+    # done/abandoned) with priors_consulted and not yet scored. For
+    # each, check whether the priors appear in the final notes and
+    # bump their project_state.usefulness_score accordingly.
+    if cwd and os.environ.get("GADFLY_HISTORIAN_PRIORS", "1") != "0":
+        try:
+            _apply_outcomes_feedback(cwd=cwd, base=base, candidate=candidate)
+        except Exception:
+            # Outcomes feedback is a quality nudge, not a requirement.
+            pass
+
     save_current(session_id, candidate)
     new_sha = audit_log.ensure_journal_snapshot(candidate.to_json())
     diff = _diff_summary(base, candidate)
@@ -808,4 +1003,11 @@ def update_for_action(
         latency_ms=latency_ms,
         error=None,
     )
-    return JournalUpdateResult(journal=candidate, error=None, skipped_reason=None, latency_ms=latency_ms, diff=diff)
+    return JournalUpdateResult(
+        journal=candidate,
+        error=None,
+        skipped_reason=None,
+        latency_ms=latency_ms,
+        diff=diff,
+        priors_consulted=list(priors_hits),
+    )

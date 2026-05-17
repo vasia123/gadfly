@@ -532,6 +532,281 @@ def test_update_writes_journal_event_to_audit_log(isolated_paths, captured_ref):
     assert (snap_dir / f"{ev['new_journal_sha']}.json").is_file()
 
 
+def test_update_injects_project_priors_when_enabled(isolated_paths, captured_ref, monkeypatch):
+    """H7/Phase B: when GADFLY_HISTORIAN_PRIORS=1 and a project corpus
+    has relevant findings, the maintainer prompt gets a 'Project priors'
+    block referencing them."""
+    from gadfly import project_state as ps_mod
+
+    monkeypatch.setenv("GADFLY_HISTORIAN_PRIORS", "1")
+
+    cwd = "/proj/with-priors"
+    # Seed a project corpus with one open promise that matches the
+    # incoming user pair.
+    digest = {
+        "session_id": "prior_session",
+        "ts": 100.0,
+        "new_promises": [{
+            "title": "implement marlin EXL3 benchmark coverage",
+            "evidence_quote": "I'll add the marlin bench later",
+        }],
+        "fulfilled_promises": [], "new_corrections": [], "knowledge_updates": [],
+    }
+    ps_mod.write_raw_digest(cwd, "prior_session", digest)
+    state = ps_mod.rebuild_from_raw(cwd)
+    ps_mod.save_state(state)
+
+    seen_prompts: list[str] = []
+
+    async def runner(prompt, options):
+        seen_prompts.append(prompt)
+        captured_ref["c"].payload = _sample_payload()
+
+    pairs = [Pair(assistant_text=None,
+                  user_text="investigate marlin regression and bench it")]
+    j.update_for_action(
+        session_id="current_session",
+        action_index=1,
+        action_summary="Bash: cargo bench",
+        assistant_reasoning=None,
+        pairs=pairs,
+        cwd=cwd,
+        run_query=runner,
+    )
+    assert len(seen_prompts) == 1
+    assert "Project priors" in seen_prompts[0]
+    assert "marlin" in seen_prompts[0].lower()
+
+
+def test_update_skips_priors_when_disabled(isolated_paths, captured_ref, monkeypatch):
+    """Phase B opt-out: no Project priors block when env var is off (default)."""
+    from gadfly import project_state as ps_mod
+
+    monkeypatch.setenv("GADFLY_HISTORIAN_PRIORS", "0")
+    cwd = "/proj/priors-off"
+    digest = {
+        "session_id": "s", "ts": 100.0,
+        "new_promises": [{"title": "implement X",
+                          "evidence_quote": "I'll do X"}],
+        "fulfilled_promises": [], "new_corrections": [], "knowledge_updates": [],
+    }
+    ps_mod.write_raw_digest(cwd, "s", digest)
+    state = ps_mod.rebuild_from_raw(cwd)
+    ps_mod.save_state(state)
+
+    seen_prompts: list[str] = []
+
+    async def runner(prompt, options):
+        seen_prompts.append(prompt)
+        captured_ref["c"].payload = _sample_payload()
+
+    j.update_for_action(
+        session_id="cur",
+        action_index=1,
+        action_summary="Bash: ls",
+        assistant_reasoning=None,
+        pairs=[Pair(assistant_text=None, user_text="implement X")],
+        cwd=cwd,
+        run_query=runner,
+    )
+    assert "Project priors" not in seen_prompts[0]
+
+
+def test_outcomes_feedback_bumps_usefulness_when_workstream_closes_with_priors(
+    isolated_paths, captured_ref, monkeypatch
+):
+    """H12: when a workstream transitions to done AND priors were
+    consulted AND the workstream's final notes mention the prior →
+    usefulness_score on that project_state entry increments."""
+    from gadfly import project_state as ps_mod
+
+    monkeypatch.setenv("GADFLY_HISTORIAN_PRIORS", "1")
+
+    cwd = "/proj/outcomes"
+    # Seed project_state with a promoted correction.
+    digests = [
+        {"session_id": f"prior_s{i}", "ts": float(i * 100),
+         "new_promises": [], "fulfilled_promises": [],
+         "new_corrections": [{"rule": "use real database in integration tests",
+                              "why": "burned by mocks", "how_to_apply": "real db",
+                              "evidence_quote": "real db please"}],
+         "knowledge_updates": []}
+        for i in range(2)
+    ]
+    for d in digests:
+        ps_mod.write_raw_digest(cwd, d["session_id"], d)
+    state = ps_mod.rebuild_from_raw(cwd)
+    ps_mod.save_state(state)
+    assert len(state.corrections) == 1
+    correction_id = next(iter(state.corrections))
+    initial_score = state.corrections[correction_id].usefulness_score
+    assert initial_score == 0
+
+    # Simulate: a workstream was open with priors_consulted referring to
+    # this correction; Haiku now closes it and mentions the rule in notes.
+    base = j.Journal(
+        root_goal="fix integration tests",
+        workstreams=[j.Workstream(
+            id="fix-tests",
+            title="repair integration tests",
+            status="in-progress",
+            notes="started",
+            priors_consulted=[f"correction:{correction_id}"],
+        )],
+        consumed_pair_hashes=["prior_pair_hash"],
+        prompt_sha=j._system_prompt_sha(),
+    )
+    j.save_current("outcomes_session", base)
+
+    closed_payload = {
+        "root_goal": "fix integration tests",
+        "workstreams": [{
+            "id": "fix-tests",
+            "title": "repair integration tests",
+            "status": "done",
+            "origin": "",
+            "notes": "Switched to a real database for integration tests, as the prior correction noted.",
+            "watchdog_flags": 0,
+            "flag_history": [],
+            "last_touched": 5,
+        }],
+        "drift": {"initial_workstream_ids": ["fix-tests"], "observations": ""},
+    }
+    runner = _runner_writing(captured_ref, closed_payload)
+
+    j.update_for_action(
+        session_id="outcomes_session",
+        action_index=5,
+        action_summary="Bash: pytest -k integration",
+        assistant_reasoning="All integration tests now pass against real DB.",
+        pairs=[],
+        new_flag_events=None,
+        cwd=cwd,
+        run_query=runner,
+    )
+
+    # Reload project state — usefulness_score should have bumped.
+    state2 = ps_mod.load_state(cwd)
+    assert state2.corrections[correction_id].usefulness_score == 1
+
+
+def test_outcomes_feedback_decrements_when_priors_were_ignored(
+    isolated_paths, captured_ref, monkeypatch
+):
+    """The other half: if a workstream closes WITHOUT mentioning the
+    priors, usefulness_score drops. Repeatedly-surfaced-but-ignored
+    priors stop appearing in retrieval."""
+    from gadfly import project_state as ps_mod
+
+    monkeypatch.setenv("GADFLY_HISTORIAN_PRIORS", "1")
+
+    cwd = "/proj/outcomes-ignored"
+    digests = [
+        {"session_id": f"prior_s{i}", "ts": float(i * 100),
+         "new_promises": [], "fulfilled_promises": [],
+         "new_corrections": [{"rule": "always run cargo fmt before commit",
+                              "why": "consistent style", "how_to_apply": "cargo fmt",
+                              "evidence_quote": "cargo fmt"}],
+         "knowledge_updates": []}
+        for i in range(2)
+    ]
+    for d in digests:
+        ps_mod.write_raw_digest(cwd, d["session_id"], d)
+    state = ps_mod.rebuild_from_raw(cwd)
+    ps_mod.save_state(state)
+    correction_id = next(iter(state.corrections))
+
+    base = j.Journal(
+        workstreams=[j.Workstream(
+            id="ws1", title="optimize hot path", status="in-progress",
+            priors_consulted=[f"correction:{correction_id}"],
+        )],
+        consumed_pair_hashes=["h"],
+        prompt_sha=j._system_prompt_sha(),
+    )
+    j.save_current("ignore_session", base)
+
+    closed = {
+        "root_goal": "",
+        "workstreams": [{
+            "id": "ws1", "title": "optimize hot path", "status": "done",
+            "origin": "", "notes": "Used SIMD intrinsics to vectorize.",
+            "watchdog_flags": 0, "flag_history": [], "last_touched": 3,
+        }],
+        "drift": {"initial_workstream_ids": [], "observations": ""},
+    }
+    j.update_for_action(
+        session_id="ignore_session",
+        action_index=3,
+        action_summary="Edit: hot.rs",
+        assistant_reasoning="done",
+        pairs=[],
+        cwd=cwd,
+        run_query=_runner_writing(captured_ref, closed),
+    )
+
+    state2 = ps_mod.load_state(cwd)
+    assert state2.corrections[correction_id].usefulness_score == -1
+
+
+def test_outcomes_feedback_idempotent_via_priors_scored_flag(
+    isolated_paths, captured_ref, monkeypatch
+):
+    """priors_scored guards against double-scoring if the same closed
+    workstream is observed across two updates."""
+    from gadfly import project_state as ps_mod
+
+    monkeypatch.setenv("GADFLY_HISTORIAN_PRIORS", "1")
+    cwd = "/proj/outcomes-idempotent"
+    for sid in ("s1", "s2"):
+        ps_mod.write_raw_digest(cwd, sid, {
+            "session_id": sid, "ts": 100.0,
+            "new_promises": [], "fulfilled_promises": [],
+            "new_corrections": [{"rule": "use real db", "why": "w",
+                                  "how_to_apply": "h",
+                                  "evidence_quote": "ev"}],
+            "knowledge_updates": [],
+        })
+    ps_mod.save_state(ps_mod.rebuild_from_raw(cwd))
+    correction_id = next(iter(ps_mod.load_state(cwd).corrections))
+
+    # Pre-scored workstream — closed already, priors_scored True.
+    pre = j.Journal(
+        workstreams=[j.Workstream(
+            id="ws1", title="something", status="done",
+            notes="real db", priors_consulted=[f"correction:{correction_id}"],
+            priors_scored=True,
+        )],
+        consumed_pair_hashes=["h"],
+        prompt_sha=j._system_prompt_sha(),
+    )
+    j.save_current("idem_session", pre)
+
+    # Run an update that re-asserts the closed status.
+    payload = {
+        "root_goal": "",
+        "workstreams": [{
+            "id": "ws1", "title": "something", "status": "done",
+            "origin": "", "notes": "real db", "watchdog_flags": 0,
+            "flag_history": [], "last_touched": 5,
+        }],
+        "drift": {"initial_workstream_ids": [], "observations": ""},
+    }
+    j.update_for_action(
+        session_id="idem_session",
+        action_index=5,
+        action_summary="Bash: ls",
+        assistant_reasoning=None,
+        pairs=[],
+        cwd=cwd,
+        run_query=_runner_writing(captured_ref, payload),
+    )
+
+    state = ps_mod.load_state(cwd)
+    # Score stayed at 0 — no double-count.
+    assert state.corrections[correction_id].usefulness_score == 0
+
+
 def test_no_change_skip_still_writes_audit_event(isolated_paths, captured_ref):
     """We log even the no-op skips so viewer can show 'observed but unchanged'."""
 

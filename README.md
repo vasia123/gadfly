@@ -112,8 +112,88 @@ Permanently — just remove the `PostToolUse` block you added to
 - `~/.claude/gadfly/system_prompts/<sha>.txt` — every system prompt
   gadfly has used, content-addressed so old verdicts stay reproducible
   even after the rubric evolves.
+- `~/.claude/gadfly/journal/<session-id>.json` — the per-session
+  journal (root goal + active workstreams + flag history).
+- `~/.claude/gadfly/project/<cwd-encoded>/` — the project corpus
+  (cross-session memory), see below.
 
 You can override the log location with `GADFLY_LOG_DIR=/some/path`.
+
+## Cross-session memory (the historian)
+
+Gadfly keeps two layers of state:
+
+- **In-session journal** — what the agent is working on *right now*.
+  Live by default, no setup needed.
+- **Cross-session corpus** — durable findings mined from EVERY prior
+  Claude Code session you've run in a given project directory.
+  Discovers open promises ("I'll do X later" → next session sees it),
+  user corrections that hold across sessions, and a knowledge graph
+  of subsystems / files. **Opt-in**: code runs by default but the
+  daemon that does the heavy lifting is not auto-started.
+
+Set the daemon running once (in a tmux, with `&`, or via systemd-user
+unit — see `docs/gadfly-historian.service.example`):
+
+```bash
+.venv/bin/python -m gadfly.historian watch &
+```
+
+It polls heartbeats every minute, digests each session after 5 min of
+silence, and writes findings to
+`~/.claude/gadfly/project/<cwd-encoded>/`.
+
+Useful one-shots:
+
+```bash
+# What does each project corpus contain right now?
+.venv/bin/python -m gadfly.historian status
+
+# Single sweep, then exit. Good for cron / cron-like usage.
+.venv/bin/python -m gadfly.historian sweep
+
+# Backfill: digest ALL prior sessions in a project from scratch.
+# Expensive — one Haiku call per session.
+.venv/bin/python -m gadfly.historian backfill /abs/path/to/project --yes-i-know-the-cost
+
+# Drift recovery: re-derive semantic state from existing raw digests.
+# No Haiku calls. Cheap and idempotent.
+.venv/bin/python -m gadfly.historian rebuild /abs/path/to/project
+
+# What would I add to my CLAUDE.md based on findings?
+.venv/bin/python -m gadfly.historian propose-claudemd /abs/path/to/project
+
+# Force-promote a quarantined finding (lift the repetition gate
+# manually — useful when you trust a single-shot user correction).
+.venv/bin/python -m gadfly.historian promote /abs/path/to/project <finding-id>
+
+# Revoke a finding (active or quarantined). Moves it to audit log;
+# rebuild will continue to honor the revocation. Raw evidence is
+# preserved.
+.venv/bin/python -m gadfly.historian revoke /abs/path/to/project <finding-id> --reason "..."
+```
+
+Finding IDs come from the viewer's Project tab (where promote/revoke
+buttons also live), from `propose-claudemd` output, or by reading
+`~/.claude/gadfly/project/<cwd-encoded>/state.json` directly.
+
+The viewer (`.venv/bin/python -m gadfly.viewer`) has a **Projects** tab
+showing each cwd's promises, corrections, subsystems, and the
+quarantine of pending findings waiting for repeat evidence.
+
+### Feature flags (env vars)
+
+The whole memory stack is controlled by these knobs. Defaults are
+sensible — set anything to `0` to roll back to a more conservative mode.
+
+| Var | Default | Effect when `0` |
+|---|---|---|
+| `GADFLY_DISABLE` | `0` | Disables the hook entirely (silent exit). |
+| `GADFLY_JOURNAL` | `1` | No per-session journal Haiku call. |
+| `GADFLY_JOURNAL_VERDICT` | `1` | Verdict prompt falls back to legacy (no journal-aware repetition rule). |
+| `GADFLY_HISTORIAN` | `1` | No heartbeats written; daemon has nothing to do. |
+| `GADFLY_HISTORIAN_PRIORS` | `1` | Journal-maintainer doesn't see project priors. |
+| `GADFLY_PHASE_C` | `1` | Priors not surfaced to the agent on new-workstream events. |
 
 ## What it catches
 

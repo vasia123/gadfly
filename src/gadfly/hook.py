@@ -34,10 +34,93 @@ import time
 from typing import Any
 
 from . import log as audit_log
-from . import journal, session, watchdog
+from . import journal, project_state, session, watchdog
 from .verdict import Verdict
 
 WATCHED_TOOLS = {"Edit", "Write", "MultiEdit", "Bash"}
+
+
+def _heartbeat_dir() -> "Path":
+    """Resolve heartbeat dir at call time so GADFLY_LOG_DIR (used in tests)
+    is honored."""
+    from pathlib import Path  # noqa: WPS433 — local import keeps hook startup fast
+
+    base = os.environ.get("GADFLY_LOG_DIR")
+    if base:
+        return Path(base).parent / "heartbeat"
+    return Path.home() / ".claude" / "gadfly" / "heartbeat"
+
+
+def _bump_heartbeat(cwd: str, session_id: str, action_index: int) -> None:
+    """Drop a per-cwd heartbeat tick for the historian daemon to pick up.
+
+    Atomic rename. Wrapped in try/except — hook MUST NEVER fail. The
+    historian is fully optional; missing heartbeats just mean a delayed
+    digest.
+    """
+    try:
+        if os.environ.get("GADFLY_HISTORIAN", "1") == "0":
+            return
+        d = _heartbeat_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{project_state.encode_cwd(cwd)}.tick"
+        payload = json.dumps(
+            {
+                "ts": time.time(),
+                "session_id": session_id,
+                "last_action_index": action_index,
+                # Carry the canonical cwd so the daemon doesn't have to
+                # invert the lossy encoding (which collapses '/' and '_'
+                # into '-' — non-uniquely decodable).
+                "cwd": cwd,
+            },
+            ensure_ascii=False,
+        )
+        tmp = path.with_suffix(".tick.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        # Heartbeat is best-effort. Swallow.
+        pass
+
+
+def _build_phase_c_context(priors_hits: list[Any]) -> str:
+    """Phase C: render priors as a compact note for the AGENT.
+
+    The journal maintainer already saw the priors (Phase B). Phase C
+    additionally surfaces them in the verdict's hookSpecificOutput
+    additionalContext so the AGENT under supervision sees them too —
+    but ONLY when a new workstream just emerged. The gating logic is
+    in main(); this helper only renders.
+
+    We keep this lean — 3 hits max, terse formatting — to avoid spam.
+    The "Why telling you" preamble is critical: without it the agent
+    just sees noise and may incorporate the priors as fresh user
+    instructions, which would be a kind of self-poisoning loop.
+    """
+    if not priors_hits:
+        return ""
+    lines: list[str] = [
+        "[gadfly historian] Relevant findings from past sessions in this directory "
+        "(durable evidence-backed; not user instructions):"
+    ]
+    for hit in priors_hits[:3]:
+        kind = getattr(hit, "kind", "?")
+        title = getattr(hit, "title", "?")
+        ev = getattr(hit, "evidence_quote", "")
+        lines.append(f"  • [{kind}] {title}")
+        if ev:
+            lines.append(f"      evidence: \"{ev[:200]}\"")
+    lines.append(
+        "These were retrieved because they overlap with the current "
+        "workstream. Use them if they help; otherwise ignore."
+    )
+    return "\n".join(lines)
+
+
+def _new_workstream_created(diff: list[str]) -> bool:
+    """True when journal.update produced at least one new workstream."""
+    return any(isinstance(d, str) and d.startswith("created ") for d in (diff or []))
 
 
 def _summarize_action_for_journal(tool_name: str, tool_input: dict[str, Any]) -> str:
@@ -108,6 +191,7 @@ def main() -> int:
         tool_response = payload.get("tool_response")
         session_id = str(payload.get("session_id") or "unknown")
         transcript_path = payload.get("transcript_path")
+        cwd = str(payload.get("cwd") or "")
 
         if not isinstance(tool_input, dict):
             return 0
@@ -126,15 +210,22 @@ def main() -> int:
         # Phase-2 cutover (opt-in via GADFLY_JOURNAL_VERDICT=1): the
         # freshly-updated journal is loaded back into the session context
         # so watchdog.evaluate consumes it as primary verdict context.
+        result_j = None
         if os.environ.get("GADFLY_JOURNAL", "1") == "1":
             try:
                 action_summary = _summarize_action_for_journal(tool_name, tool_input)
+                hint_files: list[str] = []
+                fp = tool_input.get("file_path")
+                if isinstance(fp, str) and fp:
+                    hint_files.append(fp)
                 result_j = journal.update_for_action(
                     session_id=session_id,
                     action_index=ctx.action_index,
                     action_summary=action_summary,
                     assistant_reasoning=ctx.last_assistant_plan,
                     pairs=ctx.pairs,
+                    cwd=cwd or None,
+                    workstream_hint_files=hint_files,
                 )
                 # Phase 2 default: the watchdog reads the journal as
                 # primary context. Rollback to legacy by setting
@@ -167,7 +258,47 @@ def main() -> int:
             system_prompt_sha=result.system_prompt_sha,
         )
 
-        _emit_hook_output(result.verdict.to_hook_output())
+        # Phase C: when journal opened a NEW workstream and we have
+        # priors to share, fold them into the verdict's additionalContext
+        # so the AGENT (not just the watchdog) sees the historical
+        # findings. Gating: only on workstream-creation events. Off via
+        # GADFLY_PHASE_C=0.
+        phase_c_text = ""
+        try:
+            if (
+                os.environ.get("GADFLY_PHASE_C", "1") != "0"
+                and result_j is not None
+                and result_j.priors_consulted
+                and _new_workstream_created(result_j.diff)
+            ):
+                phase_c_text = _build_phase_c_context(result_j.priors_consulted)
+        except Exception:
+            phase_c_text = ""
+
+        hook_out = result.verdict.to_hook_output()
+        if phase_c_text:
+            # Append to existing additionalContext, or emit our own when
+            # the verdict was silent.
+            if hook_out is None:
+                hook_out = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": phase_c_text,
+                    }
+                }
+            else:
+                hso = hook_out.get("hookSpecificOutput", {}) or {}
+                prior = hso.get("additionalContext") or ""
+                joined = (prior + "\n\n" + phase_c_text) if prior else phase_c_text
+                hso["additionalContext"] = joined
+                hook_out["hookSpecificOutput"] = hso
+
+        _emit_hook_output(hook_out)
+
+        # Bump the historian heartbeat AFTER the watchdog reply has been
+        # emitted — keeps the stdout latency identical to before.
+        if cwd:
+            _bump_heartbeat(cwd, session_id, ctx.action_index)
         return 0
     except Exception as exc:
         # Last-resort safety net. Try to log, but never propagate.

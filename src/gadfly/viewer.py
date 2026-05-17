@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from . import log as audit_log
+from . import project_state as ps
 
 
 def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
@@ -121,6 +122,110 @@ def _read_session(
     return {"total": total, "records": records}
 
 
+def _health_snapshot() -> dict[str, Any]:
+    """Quick health probe: backlog + last-digest-mtime + daemon-stale guess.
+
+    The viewer polls this to decide whether to show a 'daemon not
+    running?' banner. Defensive — never raises, missing things just
+    degrade to neutral values.
+    """
+    import time as _time
+
+    proot = ps.project_root()
+    newest_state_mtime = 0.0
+    digested_total = 0
+    if proot.is_dir():
+        for sp in proot.glob("*/state.json"):
+            try:
+                mt = sp.stat().st_mtime
+                if mt > newest_state_mtime:
+                    newest_state_mtime = mt
+                data = json.loads(sp.read_text(encoding="utf-8"))
+                digested_total += len(data.get("digested_sessions") or {})
+            except Exception:
+                continue
+
+    hb_dir = (
+        Path(os.environ.get("GADFLY_LOG_DIR")).parent / "heartbeat"
+        if os.environ.get("GADFLY_LOG_DIR")
+        else Path.home() / ".claude" / "gadfly" / "heartbeat"
+    )
+    active_heartbeats = 0
+    newest_hb_ts = 0.0
+    if hb_dir.is_dir():
+        for tp in hb_dir.glob("*.tick"):
+            try:
+                payload = json.loads(tp.read_text(encoding="utf-8"))
+                ts = float(payload.get("ts") or 0.0)
+                if _time.time() - ts < 600:
+                    active_heartbeats += 1
+                if ts > newest_hb_ts:
+                    newest_hb_ts = ts
+            except Exception:
+                continue
+
+    # Daemon "stale" = recent activity heard from a session AND no
+    # state.json updates in 10 min. We're cautious: if there's no
+    # heartbeat at all, the daemon has nothing to do, so don't warn.
+    stale = (
+        active_heartbeats > 0
+        and (
+            newest_state_mtime == 0.0
+            or (_time.time() - newest_state_mtime) > 600
+        )
+    )
+    return {
+        "active_heartbeats": active_heartbeats,
+        "newest_heartbeat_ts": newest_hb_ts,
+        "newest_state_mtime": newest_state_mtime,
+        "digested_total": digested_total,
+        "daemon_stale": stale,
+    }
+
+
+def _list_projects() -> list[dict[str, Any]]:
+    """List cwds with a historian corpus. Returns one row per cwd_encoded."""
+    out: list[dict[str, Any]] = []
+    proot = ps.project_root()
+    if not proot.is_dir():
+        return out
+    for d in sorted(proot.iterdir()):
+        if not d.is_dir():
+            continue
+        sp = d / "state.json"
+        if not sp.is_file():
+            continue
+        try:
+            data = json.loads(sp.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        out.append({
+            "cwd_encoded": d.name,
+            "cwd": data.get("cwd") or "",
+            "promises": len(data.get("promises") or {}),
+            "corrections": len(data.get("corrections") or {}),
+            "subsystems": len(data.get("subsystems") or {}),
+            "quarantine": len(data.get("quarantine") or []),
+            "digested": len(data.get("digested_sessions") or {}),
+            "ts": data.get("ts"),
+        })
+    return out
+
+
+def _read_project(cwd_encoded: str) -> dict[str, Any]:
+    """Return the full ProjectState for a cwd_encoded, JSON-ready."""
+    proot = ps.project_root()
+    sp = proot / cwd_encoded / "state.json"
+    if not sp.is_file():
+        return {"cwd_encoded": cwd_encoded, "missing": True}
+    try:
+        data = json.loads(sp.read_text(encoding="utf-8"))
+    except Exception:
+        return {"cwd_encoded": cwd_encoded, "missing": True}
+    data["cwd_encoded"] = cwd_encoded
+    return data
+
+
 class _Handler(BaseHTTPRequestHandler):
     log_dir: Path  # set by main()
 
@@ -144,6 +249,40 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        body_raw = self.rfile.read(length) if length else b""
+        try:
+            body = json.loads(body_raw.decode("utf-8")) if body_raw else {}
+        except Exception:
+            self._send_json({"ok": False, "error": "invalid JSON"}, status=400)
+            return
+        if path == "/api/project/promote":
+            cwd = body.get("cwd")
+            fid = body.get("id")
+            if not cwd or not fid:
+                self._send_json({"ok": False, "error": "cwd and id required"}, status=400)
+                return
+            ok, msg = ps.promote_finding(str(cwd), str(fid))
+            self._send_json({"ok": ok, "message": msg})
+            return
+        if path == "/api/project/revoke":
+            cwd = body.get("cwd")
+            fid = body.get("id")
+            reason = body.get("reason") or ""
+            if not cwd or not fid:
+                self._send_json({"ok": False, "error": "cwd and id required"}, status=400)
+                return
+            ok, msg = ps.revoke_finding(str(cwd), str(fid), reason=str(reason))
+            self._send_json({"ok": ok, "message": msg})
+            return
+        self._send_json({"ok": False, "error": "unknown endpoint"}, status=404)
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -175,6 +314,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_text("not found", status=404)
                 return
             self._send_text(text)
+            return
+        if path == "/api/projects":
+            self._send_json(_list_projects())
+            return
+        if path == "/api/health":
+            self._send_json(_health_snapshot())
+            return
+        if path.startswith("/api/project/"):
+            cwd_encoded = path[len("/api/project/"):]
+            self._send_json(_read_project(cwd_encoded))
             return
         if path.startswith("/api/journal_snapshot/"):
             sha = path[len("/api/journal_snapshot/"):]
@@ -254,6 +403,35 @@ _INDEX_HTML = r"""<!doctype html>
   .journal-diff li.dropped { color: var(--bad); }
   .journal-diff li.status { color: var(--warn); }
   .journal-skipped { padding: 8px 14px; color: var(--muted); font-size: 12px; font-style: italic; }
+  .tabbar { display: flex; gap: 4px; padding: 8px 12px 0; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .tabbar .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-radius: 6px 6px 0 0; user-select: none; }
+  .tabbar .tab:hover { color: var(--text); }
+  .tabbar .tab.active { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-bottom: 1px solid var(--bg); margin-bottom: -1px; }
+  .proj-card { padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .proj-card:hover { background: var(--panel-2); }
+  .proj-card.active { background: var(--panel-2); border-left: 3px solid #a4c98a; padding-left: 13px; }
+  .proj-card .cwd { font-family: "SF Mono", Menlo, monospace; font-size: 12px; color: var(--text); word-break: break-all; }
+  .proj-card .meta { margin-top: 4px; font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
+  .proj-section { margin: 22px 28px; }
+  .proj-section h3 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 10px; }
+  .proj-item { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin-bottom: 8px; }
+  .proj-item .title { font-weight: 600; }
+  .proj-item .body { color: var(--text); margin-top: 4px; font-size: 13px; line-height: 1.5; }
+  .proj-item .evidence { color: var(--muted); font-style: italic; margin-top: 6px; font-size: 12px; border-left: 2px solid var(--border); padding-left: 8px; }
+  .proj-item .provenance { color: var(--muted); font-size: 11px; margin-top: 4px; font-family: "SF Mono", Menlo, monospace; }
+  .proj-item.quarantine { border-color: #5a4a27; }
+  .proj-item.quarantine .status-pill { color: var(--warn); }
+  .status-pill { display: inline-block; padding: 1px 7px; border-radius: 999px; background: rgba(138,180,248,0.12); color: var(--accent); font-size: 11px; margin-left: 6px; }
+  .files-list { font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--muted); margin-top: 4px; }
+  .health-banner { background: rgba(240, 198, 116, 0.12); border-bottom: 1px solid rgba(240, 198, 116, 0.4); color: var(--warn); padding: 10px 16px; font-size: 12px; line-height: 1.5; }
+  .health-banner code { background: rgba(0,0,0,0.3); padding: 1px 5px; border-radius: 3px; font-family: "SF Mono", Menlo, monospace; }
+  .proj-item .actions { margin-top: 8px; display: flex; gap: 6px; }
+  .proj-item button { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 3px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; }
+  .proj-item button:hover { color: var(--text); border-color: var(--muted); }
+  .proj-item button.promote { color: #a4c98a; border-color: rgba(164,201,138,0.35); }
+  .proj-item button.promote:hover { background: rgba(164,201,138,0.12); }
+  .proj-item button.revoke { color: var(--bad); border-color: rgba(240,138,138,0.3); }
+  .proj-item button.revoke:hover { background: rgba(240,138,138,0.12); }
   .goal-block { padding: 12px 14px; }
   .goal-block .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
   .goal-block .body { font: 13px/1.5 -apple-system, sans-serif; white-space: pre-wrap; }
@@ -305,7 +483,13 @@ _INDEX_HTML = r"""<!doctype html>
       </span>
       <small id="refresh-indicator">·</small>
     </div>
+    <div class="tabbar">
+      <div class="tab active" id="tab-sessions" onclick="setView('sessions')">Sessions</div>
+      <div class="tab" id="tab-projects" onclick="setView('projects')">Projects</div>
+    </div>
+    <div id="health-banner" style="display:none"></div>
     <div id="sessions"></div>
+    <div id="projects" style="display:none"></div>
   </aside>
   <main>
     <div class="content-head">
@@ -331,6 +515,10 @@ let currentSession = null;
 let sessions = [];
 let currentRecords = [];
 let currentTotal = 0;
+let currentView = "sessions";
+let projects = [];
+let currentProject = null;
+let lastProjectsSig = "";
 let flaggedOnly = localStorage.getItem("gadfly.flaggedOnly") === "1";
 // Pagination state. We always request the LAST N records from the API
 // (newest live at the file's tail). `loadedCount` grows when the user
@@ -655,12 +843,230 @@ function renderJournalEvent(r) {
   `;
 }
 
+async function promoteFinding(fid) {
+  const cwd = projects.find(p => p.cwd_encoded === currentProject)?.cwd;
+  if (!cwd) { alert("project cwd unknown"); return; }
+  if (!confirm("Promote finding " + fid + " out of quarantine?")) return;
+  const r = await fetch("/api/project/promote", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({cwd, id: fid}),
+  });
+  const data = await r.json();
+  if (!data.ok) { alert("promote failed: " + (data.message || data.error)); return; }
+  loadProject(currentProject);
+}
+
+async function revokeFinding(fid) {
+  const cwd = projects.find(p => p.cwd_encoded === currentProject)?.cwd;
+  if (!cwd) { alert("project cwd unknown"); return; }
+  const reason = prompt("Revoke finding " + fid + ". Reason (optional):", "") ?? "";
+  const r = await fetch("/api/project/revoke", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({cwd, id: fid, reason}),
+  });
+  const data = await r.json();
+  if (!data.ok) { alert("revoke failed: " + (data.message || data.error)); return; }
+  loadProject(currentProject);
+}
+
 async function loadJournalSnap(sha, targetId) {
   if (!sha) return;
   const r = await fetch("/api/journal_snapshot/" + encodeURIComponent(sha));
   const text = await r.text();
   const el = document.getElementById(targetId);
   if (el) el.textContent = text;
+}
+
+function setView(view) {
+  currentView = view;
+  document.getElementById("tab-sessions").classList.toggle("active", view === "sessions");
+  document.getElementById("tab-projects").classList.toggle("active", view === "projects");
+  document.getElementById("sessions").style.display = view === "sessions" ? "" : "none";
+  document.getElementById("projects").style.display = view === "projects" ? "" : "none";
+  if (view === "projects") {
+    loadProjects();
+  } else {
+    loadSessions();
+  }
+}
+
+async function loadProjects() {
+  try {
+    const r = await fetch("/api/projects");
+    projects = await r.json();
+    renderProjects();
+    if (!currentProject && projects.length > 0) {
+      loadProject(projects[0].cwd_encoded);
+    } else if (currentProject) {
+      loadProject(currentProject);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderProjects() {
+  const sig = JSON.stringify({active: currentProject, list: projects});
+  if (sig === lastProjectsSig) return;
+  lastProjectsSig = sig;
+  const root = document.getElementById("projects");
+  if (projects.length === 0) {
+    root.innerHTML = '<div class="empty">no project corpus yet — run the historian (`python -m gadfly.historian sweep`)</div>';
+    return;
+  }
+  root.innerHTML = projects.map(p => `
+    <div class="proj-card ${currentProject === p.cwd_encoded ? 'active' : ''}" onclick="loadProject('${escapeHtml(p.cwd_encoded)}')">
+      <div class="cwd">${escapeHtml(p.cwd || p.cwd_encoded)}</div>
+      <div class="meta">
+        <span>${p.promises} promises</span>
+        <span>${p.corrections} corrections</span>
+        <span>${p.subsystems} subsystems</span>
+        ${p.quarantine > 0 ? `<span style="color:var(--warn)">${p.quarantine} quarantine</span>` : ''}
+        <span>${p.digested} sessions digested</span>
+      </div>
+    </div>
+  `).join("");
+}
+
+async function loadProject(cwdEncoded) {
+  currentProject = cwdEncoded;
+  renderProjects();
+  document.getElementById("session-title").textContent = "project memory";
+  document.getElementById("session-sid").textContent = cwdEncoded;
+  try {
+    const r = await fetch("/api/project/" + encodeURIComponent(cwdEncoded));
+    const data = await r.json();
+    renderProject(data);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderProject(data) {
+  const root = document.getElementById("records");
+  if (data.missing) {
+    root.innerHTML = '<div class="empty">project missing</div>';
+    return;
+  }
+  const sections = [];
+
+  // Promises
+  const promises = Object.values(data.promises || {});
+  if (promises.length > 0) {
+    sections.push(`
+      <div class="proj-section">
+        <h3>Open Promises (${promises.length})</h3>
+        ${promises.map(p => renderPromise(p)).join('')}
+      </div>`);
+  }
+
+  // Active corrections
+  const corrections = Object.values(data.corrections || {});
+  if (corrections.length > 0) {
+    sections.push(`
+      <div class="proj-section">
+        <h3>Active Corrections (${corrections.length})</h3>
+        ${corrections.map(c => renderCorrection(c, false)).join('')}
+      </div>`);
+  }
+
+  // Subsystems
+  const subsystems = Object.values(data.subsystems || {});
+  if (subsystems.length > 0) {
+    sections.push(`
+      <div class="proj-section">
+        <h3>Subsystems (${subsystems.length})</h3>
+        ${subsystems.map(s => renderSubsystem(s)).join('')}
+      </div>`);
+  }
+
+  // Quarantine
+  const quarantine = data.quarantine || [];
+  if (quarantine.length > 0) {
+    sections.push(`
+      <div class="proj-section">
+        <h3>Quarantine — pending promotion (${quarantine.length})</h3>
+        ${quarantine.map(q => renderQuarantine(q)).join('')}
+      </div>`);
+  }
+
+  if (sections.length === 0) {
+    sections.push('<div class="empty">no semantic findings yet — run the historian against this cwd</div>');
+  }
+
+  root.innerHTML = sections.join('');
+}
+
+function actionButtons(fid, opts) {
+  const buttons = [];
+  if (opts.promote) {
+    buttons.push(`<button class="promote" onclick="promoteFinding('${escapeHtml(fid)}')">promote</button>`);
+  }
+  if (opts.revoke) {
+    buttons.push(`<button class="revoke" onclick="revokeFinding('${escapeHtml(fid)}')">revoke</button>`);
+  }
+  return buttons.length ? `<div class="actions">${buttons.join('')}</div>` : '';
+}
+
+function renderPromise(p) {
+  const prov = p.provenance || {};
+  const statusColor = p.status === "fulfilled" ? "var(--good)" : p.status === "aged-out" ? "var(--muted)" : "var(--accent)";
+  return `
+    <div class="proj-item">
+      <div class="title">${escapeHtml(p.title || '?')} <span class="status-pill" style="color:${statusColor}">${escapeHtml(p.status || 'open')}</span></div>
+      <div class="evidence">${escapeHtml(prov.evidence_quote || '')}</div>
+      <div class="provenance">session ${escapeHtml(prov.source_session || '?').slice(0, 12)} · action #${prov.source_action_index || '?'}${p.fulfilled_in_session ? ' · fulfilled in ' + escapeHtml(p.fulfilled_in_session).slice(0,12) : ''}</div>
+      ${actionButtons(p.id || '', {revoke: true})}
+    </div>`;
+}
+
+function renderCorrection(c, isPending) {
+  const prov = c.provenance || {};
+  const seen = (c.seen_in_sessions || []).length;
+  return `
+    <div class="proj-item ${isPending ? 'quarantine' : ''}">
+      <div class="title">${escapeHtml(c.rule || '?')}${isPending ? '<span class="status-pill">pending</span>' : '<span class="status-pill">active (conf ' + (c.confidence || seen || 1) + ')</span>'}</div>
+      ${c.why ? `<div class="body"><b>why:</b> ${escapeHtml(c.why)}</div>` : ''}
+      ${c.how_to_apply ? `<div class="body"><b>how:</b> ${escapeHtml(c.how_to_apply)}</div>` : ''}
+      <div class="evidence">${escapeHtml(prov.evidence_quote || '')}</div>
+      <div class="provenance">seen in ${seen || 1} session(s) · usefulness=${c.usefulness_score || 0}</div>
+      ${actionButtons(c.id || '', {promote: isPending, revoke: true})}
+    </div>`;
+}
+
+function renderSubsystem(s) {
+  const prov = s.provenance || {};
+  const files = (s.files || []).join(', ');
+  return `
+    <div class="proj-item">
+      <div class="title">${escapeHtml(s.title || '?')} <span class="status-pill">${(s.files || []).length} files</span></div>
+      ${s.purpose ? `<div class="body">${escapeHtml(s.purpose)}</div>` : ''}
+      ${files ? `<div class="files-list">${escapeHtml(files)}</div>` : ''}
+      <div class="evidence">${escapeHtml(prov.evidence_quote || '')}</div>
+      <div class="provenance">last touched in ${escapeHtml(s.last_touched_session || '?').slice(0,12)}</div>
+      ${actionButtons(s.id || '', {revoke: true})}
+    </div>`;
+}
+
+function renderQuarantine(q) {
+  if (q.kind === "correction") {
+    return renderCorrection({...q.payload, provenance: q.provenance, seen_in_sessions: q.seen_in_sessions}, true);
+  }
+  if (q.kind === "subsystem") {
+    const fid = q.payload?.id || '';
+    return `
+      <div class="proj-item quarantine">
+        <div class="title">${escapeHtml(q.payload?.title || '?')} <span class="status-pill">pending subsystem</span></div>
+        ${q.payload?.purpose ? `<div class="body">${escapeHtml(q.payload.purpose)}</div>` : ''}
+        <div class="files-list">files mentioned: ${escapeHtml((q.file_mentions || []).join(', '))}</div>
+        <div class="evidence">${escapeHtml(q.provenance?.evidence_quote || '')}</div>
+        <div class="provenance">seen in ${(q.seen_in_sessions || []).length} session(s)</div>
+        ${actionButtons(fid, {promote: true, revoke: true})}
+      </div>`;
+  }
+  return `<div class="proj-item quarantine"><div class="title">${escapeHtml(q.kind)}</div></div>`;
 }
 
 async function loadSysPrompt(sha, targetId) {
@@ -671,9 +1077,31 @@ async function loadSysPrompt(sha, targetId) {
   if (el) el.textContent = text;
 }
 
+async function refreshHealth() {
+  try {
+    const r = await fetch("/api/health");
+    const data = await r.json();
+    const banner = document.getElementById("health-banner");
+    if (data.daemon_stale) {
+      banner.style.display = "";
+      const ageMin = data.newest_state_mtime > 0
+        ? Math.floor((Date.now() / 1000 - data.newest_state_mtime) / 60)
+        : null;
+      const lastTxt = ageMin === null ? "never" : ageMin + " min ago";
+      banner.innerHTML =
+        `⚠️ Daemon appears stale: ${data.active_heartbeats} active session(s) ` +
+        `but last digest was ${escapeHtml(lastTxt)}. Start the historian: ` +
+        `<code>python -m gadfly.historian watch &</code>`;
+    } else {
+      banner.style.display = "none";
+    }
+  } catch (e) { /* health is best-effort */ }
+}
+
 function tickRefresh() {
   const ind = document.getElementById("refresh-indicator");
   ind.textContent = "refreshing…";
+  refreshHealth();
   loadSessions().finally(() => {
     setTimeout(() => { ind.textContent = "auto-refresh 5s"; }, 200);
   });
@@ -692,6 +1120,7 @@ document.getElementById("records").addEventListener("toggle", (e) => {
   if (d.open) openDetails.add(key); else openDetails.delete(key);
 }, true);
 
+refreshHealth();
 loadSessions().then(() => {
   document.getElementById("refresh-indicator").textContent = "auto-refresh 5s";
 });

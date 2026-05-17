@@ -1,0 +1,68 @@
+# Example systemd-user unit for the gadfly historian.
+#
+# The historian is the cold-path background process that mines all
+# Claude Code transcripts in a project directory for durable findings
+# (open promises, user corrections, knowledge graph). It is fully
+# optional — gadfly's per-session journal works without it.
+#
+# Install:
+#   cp docs/gadfly-historian.service.example \
+#      ~/.config/systemd/user/gadfly-historian.service
+#   # Edit ExecStart below to point at your venv's python.
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now gadfly-historian
+#
+# Check:
+#   systemctl --user status gadfly-historian
+#   journalctl --user -u gadfly-historian -f
+#
+# Stop and remove:
+#   systemctl --user disable --now gadfly-historian
+#   rm ~/.config/systemd/user/gadfly-historian.service
+#
+# What it does in --watch mode:
+#   - polls ~/.claude/gadfly/heartbeat/ every 60 s
+#   - for each cwd: identifies sessions whose transcript has gone
+#     quiet for ≥5 min and hasn't been digested yet
+#   - runs ONE Haiku (claude-haiku-4-5) call per such session to
+#     extract findings; persists to ~/.claude/gadfly/project/<cwd>/
+#   - is polite — yields when the user's own Claude Code session is
+#     actively producing work (the heartbeat is fresh)
+#
+# Cost: ~1 Haiku call per finalised session (~3–10 s, well under $0.01
+# at current pricing). For a busy day of coding (~20 sessions) the
+# subscription quota impact is negligible.
+
+[Unit]
+Description=Gadfly project historian (Claude Code session-corpus miner)
+Documentation=https://github.com/<you>/gadfly
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# EDIT ME — point at your gadfly checkout's venv python and the watch
+# subcommand. The "watch" mode is a long-running poll loop.
+ExecStart=%h/projects_hobby/gadfly/.venv/bin/python -m gadfly.historian watch
+
+# Restart on transient failures, but back off so a broken install
+# doesn't hammer the system.
+Restart=on-failure
+RestartSec=30s
+
+# Logs land in journalctl --user -u gadfly-historian; the daemon also
+# writes per-session audit events under ~/.claude/gadfly/log/.
+
+# Polite resource limits. The historian is mostly I/O-bound (Haiku
+# call latency dominates) so these are loose ceilings, not pinches.
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=5
+CPUQuota=50%
+
+# Optional: opt out of specific features by uncommenting.
+# Environment="GADFLY_PHASE_C=0"           # disable agent-context injection
+# Environment="GADFLY_HISTORIAN_PRIORS=0"  # disable Phase B priors injection
+# Environment="GADFLY_LOG_DIR=%h/.claude/gadfly/log"  # custom log root
+
+[Install]
+WantedBy=default.target
