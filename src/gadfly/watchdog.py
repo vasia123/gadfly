@@ -167,6 +167,9 @@ async def evaluate_async(
                 verdict_patterns = state.verdict_patterns
         except Exception:
             verdict_patterns = None
+    latest_user_msg = (
+        context.recent_user_requests[-1] if context.recent_user_requests else None
+    )
     user_message = build_user_message(
         tool_name=tool_name,
         tool_input=tool_input,
@@ -177,6 +180,8 @@ async def evaluate_async(
         distilled_goal=context.distilled_goal,
         journal=context.journal if use_journal else None,
         verdict_patterns=verdict_patterns,
+        per_file_edit_history=context.per_file_edit_history,
+        latest_user_message_verbatim=latest_user_msg,
     )
     system_prompt_sha = audit_log.ensure_system_prompt(system_prompt)
 

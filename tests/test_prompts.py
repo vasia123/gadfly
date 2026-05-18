@@ -259,3 +259,94 @@ def test_system_prompt_includes_root_cause_discipline():
     assert "type: ignore" in p or "noqa" in p
     # The output convention so the agent can spot this class of feedback.
     assert 'symptom fix:' in p or "symptom fix" in p
+
+
+# --- Per-file edit history + explicit redirect rule ------------------------
+
+
+def test_journal_system_prompt_includes_explicit_redirect_rule():
+    """New rule must mention the key markers so a future prompt rewrite
+    that drops the multilingual semantic clause fails this test."""
+    p = prompts.SYSTEM_PROMPT_JOURNAL
+    assert "EXPLICIT USER REDIRECT" in p
+    assert "first action" in p.lower()
+    # Multilingual examples — load-bearing for the "semantic, not lexical"
+    # rule. If someone deletes them, fail loudly.
+    assert "глянь" in p or "посмотри" in p
+    assert "regarde" in p
+
+
+def test_build_user_message_journal_mode_includes_latest_user_msg():
+    from gadfly.journal import Journal, Workstream, Drift
+    j = Journal(
+        root_goal="historian work",
+        workstreams=[Workstream(id="w1", title="finish historian",
+                                status="in-progress", last_touched=10)],
+        drift=Drift(),
+        action_index=10,
+    )
+    msg = prompts.build_user_message(
+        tool_name="Bash", tool_input={"command": "ls"},
+        tool_response={"exit_code": 0},
+        recent_user_requests=["глянь на vllm-rust сессию"],
+        last_assistant_plan=None, recent_actions=[],
+        journal=j,
+        latest_user_message_verbatim="глянь на vllm-rust сессию",
+    )
+    assert "Most recent user message" in msg
+    assert "глянь на vllm-rust сессию" in msg
+
+
+def test_build_user_message_journal_mode_includes_per_file_history():
+    from gadfly.journal import Journal, Workstream, Drift
+    j = Journal(
+        root_goal="historian work",
+        workstreams=[Workstream(id="w1", title="finish historian",
+                                status="in-progress", last_touched=10)],
+        drift=Drift(),
+        action_index=10,
+    )
+    history = {
+        "src/a.py": [
+            "#1 Edit\n  -: \n  +: def helper(): pass",
+            "#7 Edit\n  -: helper()\n  +: helper(42)",
+        ],
+    }
+    msg = prompts.build_user_message(
+        tool_name="Edit",
+        tool_input={"file_path": "src/a.py", "old_string": "x", "new_string": "y"},
+        tool_response={"success": True},
+        recent_user_requests=["edit a.py"],
+        last_assistant_plan=None, recent_actions=[],
+        journal=j,
+        per_file_edit_history=history,
+    )
+    assert "src/a.py" in msg
+    assert "def helper" in msg
+    assert "All prior touches" in msg
+
+
+def test_build_user_message_legacy_mode_includes_per_file_history():
+    history = {"src/a.py": ["#1 Edit\n  -: \n  +: def helper(): pass"]}
+    msg = prompts.build_user_message(
+        tool_name="Edit",
+        tool_input={"file_path": "src/a.py", "old_string": "x", "new_string": "y"},
+        tool_response={"success": True},
+        recent_user_requests=["edit a.py"],
+        last_assistant_plan=None, recent_actions=["Edit(src/a.py)"],
+        per_file_edit_history=history,
+    )
+    assert "All prior touches" in msg
+    assert "def helper" in msg
+
+
+def test_build_user_message_without_history_or_redirect_emits_no_blocks():
+    msg = prompts.build_user_message(
+        tool_name="Edit",
+        tool_input={"file_path": "src/a.py", "old_string": "x", "new_string": "y"},
+        tool_response={"success": True},
+        recent_user_requests=["edit a.py"],
+        last_assistant_plan=None, recent_actions=[],
+    )
+    assert "All prior touches" not in msg
+    assert "Most recent user message" not in msg

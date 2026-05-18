@@ -226,3 +226,93 @@ def test_load_tolerates_malformed_lines(tmp_path: Path):
     )
     ctx = session.load(str(p))
     assert ctx.recent_user_requests == ["hi"]
+
+
+# --- Per-file edit history -------------------------------------------------
+
+
+def _edit(file_path: str, new: str = "code", old: str = "") -> dict:
+    return {
+        "type": "tool_use",
+        "name": "Edit",
+        "input": {"file_path": file_path, "old_string": old, "new_string": new},
+    }
+
+
+def _asst(*tools: dict) -> dict:
+    return {"message": {"role": "assistant", "content": list(tools)}}
+
+
+def test_per_file_edit_history_collects_all_touches_to_same_file(tmp_path: Path):
+    """Edit-window blindness regression. 8 Edits to file A across the
+    session — recent_actions caps at 5, but per_file_edit_history MUST
+    contain all 8 so a later use of a symbol defined in Edit #1 is
+    still visible to the watchdog."""
+    p = tmp_path / "t.jsonl"
+    entries = []
+    # Edit #1: defines a helper.
+    entries.append(_asst(_edit("a.py",
+                                old="",
+                                new="def helper(): return 42")))
+    # 7 more edits — some to other files so action_index advances.
+    for i in range(2, 9):
+        fp = "a.py" if i % 2 == 0 else "b.py"
+        entries.append(_asst(_edit(fp, old="x", new=f"y{i}")))
+    _write_jsonl(p, entries)
+
+    ctx = session.load(str(p), distill=False)
+    assert "a.py" in ctx.per_file_edit_history
+    a_touches = ctx.per_file_edit_history["a.py"]
+    # All 5 Edit('a.py') touches present (every even index).
+    assert len(a_touches) == 5
+    # The defining edit (helper definition) is preserved.
+    assert any("def helper" in t for t in a_touches), (
+        f"defining edit dropped: {a_touches!r}"
+    )
+    # b.py is also tracked.
+    assert "b.py" in ctx.per_file_edit_history
+
+
+def test_per_file_edit_history_caps_total_files(tmp_path: Path):
+    """When 5+ distinct files were edited, only max_files (3 by default)
+    surface — current_file + 2 most-recently-touched others."""
+    p = tmp_path / "t.jsonl"
+    entries = []
+    for fname in ("a.py", "b.py", "c.py", "d.py", "e.py"):
+        entries.append(_asst(_edit(fname, new=f"// {fname}")))
+    _write_jsonl(p, entries)
+
+    ctx = session.load(str(p), distill=False)
+    assert len(ctx.per_file_edit_history) <= 3
+    # The most-recent file (e.py — current_file) is always included.
+    assert "e.py" in ctx.per_file_edit_history
+
+
+def test_per_file_edit_history_byte_budget_drops_oldest(tmp_path: Path):
+    """Per-file budget: when ALL touches together exceed
+    max_per_file_bytes, the OLDEST drop first."""
+    # Direct call to the extractor with a tiny budget — avoids needing
+    # huge fixture transcripts to trip the cap.
+    entries = []
+    for i in range(20):
+        entries.append(_asst(_edit("a.py",
+                                    old="",
+                                    new=f"line_{i}_" + "x" * 50)))
+    out = session.extract_per_file_edit_history(
+        entries, current_file="a.py", max_per_file_bytes=500,
+    )
+    a_touches = out["a.py"]
+    # Older lines dropped → only later ones remain.
+    assert all("line_0_" not in t for t in a_touches)
+    assert any("line_19" in t for t in a_touches)
+
+
+def test_per_file_edit_history_empty_when_no_file_touches(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(p, [
+        {"message": {"role": "user", "content": "hi"}},
+        _asst({"type": "tool_use", "name": "Bash",
+               "input": {"command": "ls"}}),
+    ])
+    ctx = session.load(str(p), distill=False)
+    assert ctx.per_file_edit_history == {}

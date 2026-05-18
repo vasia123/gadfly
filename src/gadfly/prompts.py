@@ -293,6 +293,33 @@ its own — the agent may be addressing a real new problem. Flag only
 when the current action *advances* a drifted workstream while a stated
 priority workstream sits untouched and the agent does NOT acknowledge
 the trade-off.
+
+# EXPLICIT USER REDIRECT — silence drift flags on the first action
+
+The newest user message is rendered separately below the journal. If
+it explicitly redirects the agent to a new file, project, or topic —
+in ANY language — and the action you are evaluating is the FIRST
+move in that new direction, DO NOT flag drift / "unexplained context
+shift" / "no workstream exists". The journal updates AFTER the user's
+turn; the first action of a redirect is expected to precede any
+matching workstream entry.
+
+Redirect signal — semantic, not lexical. The user is redirecting when
+their message:
+  - names a different project / directory / file to look at,
+  - asks to investigate / examine / fix something not in any current
+    workstream,
+  - switches topic with no acknowledgment of the prior workstream's
+    status.
+
+This works across languages — Russian "глянь на X", "посмотри X",
+French "regarde X", Japanese "Xを見て", Spanish "mira X", etc. Read
+the semantic meaning, not the keywords. A user message that simply
+asks for analysis OF the current workstream is NOT a redirect.
+
+Subsequent actions in the same direction may still be evaluated for
+drift normally — by then the journal-maintainer has had a chance to
+create the new workstream and you have the right baseline.
 """
 
 
@@ -447,6 +474,35 @@ def _render_verdict_patterns_block(verdict_patterns: dict[str, Any] | None) -> s
     return "\n".join(lines)
 
 
+def _render_per_file_edit_history(
+    history: dict[str, list[str]] | None,
+) -> str:
+    """Render per-file edit history as a bullet-formatted block.
+
+    Each file becomes its own `### path` heading followed by one line per
+    prior touch. The block exists to defeat edit-window blindness: when
+    a symbol was defined in an Edit that fell off recent_actions[-5:],
+    its definition is still visible here.
+    """
+    if not history:
+        return ""
+    lines: list[str] = []
+    lines.append(
+        "## All prior touches of the relevant files in THIS session "
+        "(complete, not capped at 5)"
+    )
+    lines.append(
+        "If the current action references symbols, functions or variables "
+        "that appear in the history below, they ARE defined — even when "
+        "the defining edit doesn't appear in the short recent_actions list."
+    )
+    for fp, touches in history.items():
+        lines.append(f"\n### {fp}")
+        for t in touches:
+            lines.append(t)
+    return "\n".join(lines)
+
+
 def build_user_message(
     *,
     tool_name: str,
@@ -458,6 +514,8 @@ def build_user_message(
     distilled_goal: str | None = None,
     journal: Any = None,
     verdict_patterns: dict[str, Any] | None = None,
+    per_file_edit_history: dict[str, list[str]] | None = None,
+    latest_user_message_verbatim: str | None = None,
 ) -> str:
     """Compose the user-message for Haiku for a single tool-call review.
 
@@ -491,6 +549,21 @@ def build_user_message(
                     "not already corroborate, flag it.\n\n"
                     + _truncate(last_assistant_plan, 4000)
                 )
+
+            if latest_user_message_verbatim:
+                parts.append(
+                    "# Most recent user message (verbatim)\n"
+                    "The journal-maintainer compresses user messages into "
+                    "workstreams AFTER the user's turn. The first action of "
+                    "a redirect therefore precedes any matching workstream "
+                    "entry. Read this verbatim text before applying the "
+                    "EXPLICIT USER REDIRECT rule.\n\n"
+                    + _truncate(latest_user_message_verbatim, 2000)
+                )
+
+            history_block = _render_per_file_edit_history(per_file_edit_history)
+            if history_block:
+                parts.append(history_block)
 
             parts.append("# The tool call to evaluate (together with the reasoning above)")
             parts.append(f"## tool_name\n{tool_name}")
@@ -564,6 +637,10 @@ def build_user_message(
             "references symbols, variables, or files introduced here, treat "
             "them as defined.\n" + bullets
         )
+
+    history_block = _render_per_file_edit_history(per_file_edit_history)
+    if history_block:
+        parts.append(history_block)
 
     parts.append("# The tool call to evaluate (together with the reasoning above)")
     parts.append(f"## tool_name\n{tool_name}")

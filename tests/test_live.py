@@ -470,3 +470,97 @@ def test_historian_cross_session_fulfillment_russian(tmp_path, monkeypatch):
     rebuilt = project_state_mod.rebuild_from_raw(cwd)
     assert rebuilt.promises[pid].status == "fulfilled"
     assert rebuilt.promises[pid].fulfilled_in_session == "ru-session"
+
+
+@live
+def test_evaluate_does_not_flag_use_of_earlier_defined_symbol():
+    """Edit-window-blindness regression. Build a SessionContext with a
+    per-file edit history showing `helper()` was defined in the same
+    file 10 edits ago. The CURRENT action is an Edit that CALLS helper().
+    Watchdog must NOT flag "function not defined" — the per-file history
+    surfaces the definition even though it's out of recent_actions."""
+    pfh = {
+        "src/util.py": [
+            "#1 Edit\n  -: \n  +: def helper(x):\n    return x * 2",
+            "#3 Edit\n  -: pass\n  +: def caller_a(): return helper(1)",
+            "#5 Edit\n  -: pass\n  +: def caller_b(): return helper(2)",
+            "#10 Edit\n  -: pass\n  +: def caller_c(): return helper(3)",
+        ],
+    }
+    # recent_actions deliberately does NOT include the defining edit.
+    res = evaluate(
+        tool_name="Edit",
+        tool_input={
+            "file_path": "src/util.py",
+            "old_string": "pass  # callsite",
+            "new_string": "return helper(42)  # uses helper defined 11 edits ago",
+        },
+        tool_response={"success": True},
+        context=SessionContext(
+            distilled_goal="ship util.py with multiple call sites of helper()",
+            recent_user_requests=["wire up callers of helper"],
+            last_assistant_plan="adding another caller of helper",
+            recent_actions=[
+                "Edit(other.py)\n  -: a\n  +: b",
+                "Edit(other.py)\n  -: c\n  +: d",
+                "Edit(other.py)\n  -: e\n  +: f",
+                "Edit(other.py)\n  -: g\n  +: h",
+                "Edit(other.py)\n  -: i\n  +: j",
+            ],
+            per_file_edit_history=pfh,
+        ),
+    )
+    assert res.error is None, f"SDK failed: {res.error}"
+    # The key assertion: even if Haiku flags something, the reason MUST
+    # NOT claim `helper` is undefined. That's the failure mode we fixed.
+    reason = (res.verdict.reason or "").lower()
+    assert "helper" not in reason or "not defined" not in reason, (
+        f"watchdog still claims helper is undefined despite per-file history:\n"
+        f"  reason: {res.verdict.reason}\n"
+        f"  suggestion: {res.verdict.suggestion}"
+    )
+
+
+@live
+def test_evaluate_silences_drift_on_explicit_user_redirect():
+    """Failure mode 2 regression. Build a journal with a 'finish historian'
+    workstream, then evaluate a Bash action exploring a completely
+    different project — but with a recent user message that explicitly
+    redirects ("глянь на vllm-rust сессию"). The EXPLICIT USER REDIRECT
+    rule should keep watchdog silent on this first action."""
+    from gadfly.journal import Journal, Workstream, Drift
+    j = Journal(
+        root_goal="finish historian phase A/B/C",
+        workstreams=[
+            Workstream(
+                id="historian-system",
+                title="historian system, phase A/B/C completion",
+                status="in-progress",
+                last_touched=20,
+                notes="phase B retrieval validated against gadfly corpus",
+            )
+        ],
+        drift=Drift(initial_workstream_ids=["historian-system"]),
+        action_index=21,
+    )
+    res = evaluate(
+        tool_name="Bash",
+        tool_input={
+            "command": "ls -lt ~/.claude/projects/ | grep -i vllm",
+            "description": "Find vllm-rust project dir",
+        },
+        tool_response={"exit_code": 0, "stdout": "-home-vasis-projects-hobby-vllm-rust"},
+        context=SessionContext(
+            recent_user_requests=["глянь на сессию vllm-rust"],
+            last_assistant_plan="user asked to look at vllm-rust — finding the dir",
+            recent_actions=[],
+            journal=j,
+        ),
+    )
+    assert res.error is None, f"SDK failed: {res.error}"
+    # Must stay silent — user explicitly redirected.
+    assert res.verdict.professional is True, (
+        f"watchdog flagged drift despite explicit user redirect.\n"
+        f"  reason: {res.verdict.reason}\n"
+        f"  suggestion: {res.verdict.suggestion}"
+    )

@@ -51,6 +51,11 @@ class SessionContext:
     # Watchdog uses it to look up project_state.verdict_patterns for
     # the E2 self-calibration block.
     cwd: str = ""
+    # Per-file edit history covering ALL prior Edit/Write/MultiEdit
+    # touches in this session, grouped by file_path. Solves edit-window
+    # blindness — when a symbol's defining edit falls off the
+    # recent_actions[-5:] window, the per-file list still surfaces it.
+    per_file_edit_history: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def last_user_request(self) -> str | None:
@@ -259,4 +264,136 @@ def load(
     except Exception:
         ctx.pairs = []
 
+    # Per-file edit history. Solves the "edit-window blindness" failure
+    # mode: when an agent does 8+ Edits to the same file, the first
+    # ones fall off recent_actions[-5:] and the watchdog flags a later
+    # use of an earlier-defined symbol as undefined. This block keeps
+    # every prior touch of relevant files in front of Haiku.
+    try:
+        # The current action's file (derive from the last tool_use's
+        # file_path in transcript order) — gets priority for inclusion.
+        current_file: str | None = None
+        for entry in reversed(entries):
+            msg = entry.get("message") if isinstance(entry, dict) else None
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            for name, inp in _extract_tool_uses(msg.get("content")):
+                fp = inp.get("file_path")
+                if isinstance(fp, str) and fp and name in _FILE_TOUCH_TOOLS:
+                    current_file = fp
+                    break
+            if current_file:
+                break
+        ctx.per_file_edit_history = extract_per_file_edit_history(
+            entries, current_file=current_file,
+        )
+    except Exception:
+        ctx.per_file_edit_history = {}
+
     return ctx
+
+
+# --- Per-file edit history --------------------------------------------------
+
+
+_FILE_TOUCH_TOOLS = {"Edit", "Write", "MultiEdit"}
+
+
+def _format_file_touch(
+    *,
+    action_index: int,
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> str:
+    """Compact one-line summary of one Edit/Write/MultiEdit on a file.
+
+    Tight previews (≤80c old / ≤300c new) keep per-file budget reasonable
+    while still surfacing the symbols introduced.
+    """
+    if tool_name == "Edit":
+        old = _clip(tool_input.get("old_string", ""), 80)
+        new = _clip(tool_input.get("new_string", ""), 300)
+        return f"#{action_index} Edit\n  -: {old}\n  +: {new}"
+    if tool_name == "Write":
+        body = _clip(tool_input.get("content", ""), 300)
+        return f"#{action_index} Write\n  body: {body}"
+    if tool_name == "MultiEdit":
+        edits = tool_input.get("edits") or []
+        lines = [f"#{action_index} MultiEdit ({len(edits)} edits)"]
+        for j, e in enumerate(edits[:3]):
+            if isinstance(e, dict):
+                old = _clip(e.get("old_string", ""), 80)
+                new = _clip(e.get("new_string", ""), 200)
+                lines.append(f"  edit {j} -: {old}")
+                lines.append(f"  edit {j} +: {new}")
+        if len(edits) > 3:
+            lines.append(f"  …[{len(edits) - 3} more]")
+        return "\n".join(lines)
+    return f"#{action_index} {tool_name}"
+
+
+def extract_per_file_edit_history(
+    entries: list[dict[str, Any]],
+    *,
+    current_file: str | None = None,
+    max_files: int = 3,
+    max_per_file_bytes: int = 6000,
+) -> dict[str, list[str]]:
+    """Walk transcript entries, group Edit/Write/MultiEdit touches by file.
+
+    Returns `{file_path: [formatted_touch, ...]}`. Each touch is the
+    output of `_format_file_touch`. Files included:
+      - `current_file` always, if it has touches.
+      - up to `max_files - 1` additional files by recency of last touch.
+    Each file's list is truncated to fit ≤max_per_file_bytes (oldest
+    touches drop first — we want recent changes most visible, but the
+    DEFINITION often happens in the FIRST edit; the cap is generous
+    enough that real series of 10-15 edits to one file still fit).
+    """
+    per_file: dict[str, list[tuple[int, str]]] = {}
+    last_touch_idx: dict[str, int] = {}
+    action_index = 0
+    for entry in entries:
+        msg = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for name, inp in _extract_tool_uses(msg.get("content")):
+            action_index += 1
+            if name not in _FILE_TOUCH_TOOLS:
+                continue
+            fp = inp.get("file_path")
+            if not isinstance(fp, str) or not fp:
+                continue
+            line = _format_file_touch(
+                action_index=action_index, tool_name=name, tool_input=inp,
+            )
+            per_file.setdefault(fp, []).append((action_index, line))
+            last_touch_idx[fp] = action_index
+
+    if not per_file:
+        return {}
+
+    # Pick which files to include: current_file first, then others by
+    # most recent touch.
+    candidates: list[str] = []
+    if current_file and current_file in per_file:
+        candidates.append(current_file)
+    others = sorted(
+        (fp for fp in per_file if fp != current_file),
+        key=lambda f: -last_touch_idx.get(f, 0),
+    )
+    for fp in others:
+        if len(candidates) >= max_files:
+            break
+        candidates.append(fp)
+
+    # Apply per-file byte budget. Drop oldest touches first when over.
+    out: dict[str, list[str]] = {}
+    for fp in candidates:
+        touches = [line for _, line in per_file[fp]]
+        total = sum(len(s) for s in touches) + len(touches)  # +newlines
+        while total > max_per_file_bytes and len(touches) > 1:
+            dropped = touches.pop(0)
+            total -= len(dropped) + 1
+        out[fp] = touches
+    return out
