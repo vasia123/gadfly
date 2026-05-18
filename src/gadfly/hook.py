@@ -279,8 +279,9 @@ def main() -> int:
         ctx = session.load(
             transcript_path if isinstance(transcript_path, str) else None,
             session_id=session_id,
+            current_tool_input=tool_input,
+            cwd=cwd,
         )
-        ctx.cwd = cwd  # so watchdog can look up verdict_patterns (E2)
 
         # Phase-1 shadow: maintain a session journal alongside the
         # existing watchdog. The verdict prompt does NOT yet consume the

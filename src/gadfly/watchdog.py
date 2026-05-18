@@ -180,8 +180,12 @@ async def evaluate_async(
         distilled_goal=context.distilled_goal,
         journal=context.journal if use_journal else None,
         verdict_patterns=verdict_patterns,
-        per_file_edit_history=context.per_file_edit_history,
+        per_file_snapshots=context.per_file_snapshots,
+        file_touch_trajectory=context.file_touch_trajectory,
         latest_user_message_verbatim=latest_user_msg,
+        active_plan=context.active_plan,
+        recent_dialogue_pairs=context.recent_dialogue_pairs,
+        cwd=context.cwd,
     )
     system_prompt_sha = audit_log.ensure_system_prompt(system_prompt)
 

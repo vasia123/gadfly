@@ -228,10 +228,12 @@ def test_load_tolerates_malformed_lines(tmp_path: Path):
     assert ctx.recent_user_requests == ["hi"]
 
 
-# --- Per-file edit history -------------------------------------------------
 
 
-def _edit(file_path: str, new: str = "code", old: str = "") -> dict:
+# --- Per-file snapshot + trajectory ----------------------------------------
+
+
+def _edit(file_path: str, new: str = "x", old: str = "") -> dict:
     return {
         "type": "tool_use",
         "name": "Edit",
@@ -243,99 +245,393 @@ def _asst(*tools: dict) -> dict:
     return {"message": {"role": "assistant", "content": list(tools)}}
 
 
-def test_per_file_edit_history_collects_all_touches_to_same_file(tmp_path: Path):
-    """Edit-window blindness regression. 8 Edits to file A across the
-    session — recent_actions caps at 5, but per_file_edit_history MUST
-    contain all 8 so a later use of a symbol defined in Edit #1 is
-    still visible to the watchdog."""
-    p = tmp_path / "t.jsonl"
-    entries = []
-    # Edit #1: defines a helper.
-    entries.append(_asst(_edit("a.py",
-                                old="",
-                                new="def helper(): return 42")))
-    # 7 more edits — some to other files so action_index advances.
-    for i in range(2, 9):
-        fp = "a.py" if i % 2 == 0 else "b.py"
-        entries.append(_asst(_edit(fp, old="x", new=f"y{i}")))
-    _write_jsonl(p, entries)
-
-    ctx = session.load(str(p), distill=False)
-    assert "a.py" in ctx.per_file_edit_history
-    a_touches = ctx.per_file_edit_history["a.py"]
-    # All 5 Edit('a.py') touches present (every even index).
-    assert len(a_touches) == 5
-    # The defining edit (helper definition) is preserved.
-    assert any("def helper" in t for t in a_touches), (
-        f"defining edit dropped: {a_touches!r}"
-    )
-    # b.py is also tracked.
-    assert "b.py" in ctx.per_file_edit_history
-
-
-def test_per_file_edit_history_caps_total_files(tmp_path: Path):
-    """When 5+ distinct files were edited, only max_files (3 by default)
-    surface — current_file + 2 most-recently-touched others."""
-    p = tmp_path / "t.jsonl"
-    entries = []
-    for fname in ("a.py", "b.py", "c.py", "d.py", "e.py"):
-        entries.append(_asst(_edit(fname, new=f"// {fname}")))
-    _write_jsonl(p, entries)
-
-    ctx = session.load(str(p), distill=False)
-    assert len(ctx.per_file_edit_history) <= 3
-    # The most-recent file (e.py — current_file) is always included.
-    assert "e.py" in ctx.per_file_edit_history
-
-
-def test_per_file_edit_history_byte_budget_drops_oldest(tmp_path: Path):
-    """Per-file budget: when ALL touches together exceed
-    max_per_file_bytes, the OLDEST drop first."""
-    # Direct call to the extractor with a tiny budget — avoids needing
-    # huge fixture transcripts to trip the cap.
-    entries = []
-    for i in range(20):
-        entries.append(_asst(_edit("a.py",
-                                    old="",
-                                    new=f"line_{i}_" + "x" * 50)))
-    out = session.extract_per_file_edit_history(
-        entries, current_file="a.py", max_per_file_bytes=500,
-    )
-    a_touches = out["a.py"]
-    # Older lines dropped → only later ones remain.
-    assert all("line_0_" not in t for t in a_touches)
-    assert any("line_19" in t for t in a_touches)
-
-
-def test_per_file_edit_history_empty_when_no_file_touches(tmp_path: Path):
+def test_file_touch_trajectory_records_tool_and_path(tmp_path: Path):
     p = tmp_path / "t.jsonl"
     _write_jsonl(p, [
-        {"message": {"role": "user", "content": "hi"}},
+        _asst(_edit("a.py")),
+        _asst(_edit("b.py")),
         _asst({"type": "tool_use", "name": "Bash",
                "input": {"command": "ls"}}),
+        _asst(_edit("a.py")),
     ])
     ctx = session.load(str(p), distill=False)
-    assert ctx.per_file_edit_history == {}
+    # Bash filtered out — only file-touching tools recorded.
+    paths = [t[2] for t in ctx.file_touch_trajectory]
+    assert paths == ["a.py", "b.py", "a.py"]
+    # Action_index is the global tool_use index, not just file-touches.
+    assert ctx.file_touch_trajectory[0][0] == 1
+    assert ctx.file_touch_trajectory[1][0] == 2
+    assert ctx.file_touch_trajectory[2][0] == 4
+    # Tool names preserved.
+    assert all(t[1] == "Edit" for t in ctx.file_touch_trajectory)
 
 
-def test_per_file_edit_history_preserves_write_under_budget_pressure():
-    """When budget is tight, oldest Edits drop first — Write (the file's
-    foundation, contains all symbol definitions) MUST stay. Regression
-    for the bizprofit LIFECYCLE_LABELS false positive."""
-    write_content = "export const LIFECYCLE_LABELS = {sale: 'Sale'}\n" + "x" * 5000
-    entries = [_asst({
-        "type": "tool_use", "name": "Write",
-        "input": {"file_path": "f.ts", "content": write_content},
-    })]
-    # 30 follow-up edits to the same file.
-    for i in range(30):
-        entries.append(_asst(_edit("f.ts", old="x", new=f"new_{i}_" + "y" * 100)))
-    out = session.extract_per_file_edit_history(
-        entries, current_file="f.ts", max_per_file_bytes=2000,
+def test_file_touch_trajectory_caps_at_last_n(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(p, [_asst(_edit(f"f{i}.py")) for i in range(20)])
+    ctx = session.load(str(p), distill=False)
+    assert len(ctx.file_touch_trajectory) == session.MAX_TRAJECTORY
+    # The LAST 10 — files f10..f19.
+    paths = [t[2] for t in ctx.file_touch_trajectory]
+    assert paths[0] == "f10.py"
+    assert paths[-1] == "f19.py"
+
+
+def test_per_file_snapshot_reads_disk(tmp_path: Path):
+    """Snapshot is the real on-disk content — that's what defeats
+    edit-window blindness without any regex / heuristic."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    target = proj / "util.rs"
+    target.write_text("pub fn helper(x: u32) -> u32 { x * 2 }\n")
+    tpath = tmp_path / "t.jsonl"
+    _write_jsonl(tpath, [_asst(_edit(str(target), new="content"))])
+
+    out = session.extract_per_file_snapshots(
+        [_asst(_edit(str(target)))],  # synthetic entries
+        cwd=str(proj),
     )
-    joined = "\n".join(out["f.ts"])
-    # Write content (with LIFECYCLE_LABELS) MUST survive.
-    assert "LIFECYCLE_LABELS" in joined, (
-        f"Write was dropped under budget pressure — symbol lost. "
-        f"history: {out['f.ts']!r}"
+    assert str(target) in out
+    assert "pub fn helper" in out[str(target)]
+
+
+def test_per_file_snapshot_picks_recently_touched_files(tmp_path: Path):
+    proj = tmp_path / "p"
+    proj.mkdir()
+    for fname, body in [
+        ("a.py", "def a(): pass\n"),
+        ("b.py", "def b(): pass\n"),
+        ("c.py", "def c(): pass\n"),
+        ("d.py", "def d(): pass\n"),
+        ("e.py", "def e(): pass\n"),
+    ]:
+        (proj / fname).write_text(body)
+    entries = [_asst(_edit(str(proj / f))) for f in ("a.py", "b.py", "c.py", "d.py", "e.py")]
+    out = session.extract_per_file_snapshots(entries, cwd=str(proj))
+    # Capped at MAX_SNAPSHOT_FILES (3). Most recent wins.
+    assert len(out) == session.MAX_SNAPSHOT_FILES
+    paths = set(out.keys())
+    assert str(proj / "e.py") in paths
+    assert str(proj / "d.py") in paths
+    assert str(proj / "c.py") in paths
+
+
+def test_per_file_snapshot_truncates_huge_file(tmp_path: Path):
+    """Files past the byte budget show head + truncation marker + tail.
+    Marker is explicit — Haiku sees `[…truncated middle…]` and knows
+    bytes were dropped (and which slice of the file is missing). This
+    is a size-budget decision, NOT a content heuristic."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    huge = proj / "big.py"
+    body = "HEAD_MARKER\n" + ("x" * 40_000) + "\nTAIL_MARKER\n"
+    huge.write_text(body)
+    entries = [_asst(_edit(str(huge)))]
+    out = session.extract_per_file_snapshots(entries, cwd=str(proj))
+    snap = out[str(huge)]
+    assert "HEAD_MARKER" in snap
+    assert "TAIL_MARKER" in snap
+    assert "truncated middle" in snap
+    assert "bytes" in snap
+
+
+def test_per_file_snapshot_refuses_paths_outside_cwd(tmp_path: Path):
+    """Belt-and-braces against leaking arbitrary filesystem into prompts.
+    Edit with file_path=/etc/passwd MUST NOT be read."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret content")
+    entries = [_asst(_edit(str(outside)))]
+    out = session.extract_per_file_snapshots(entries, cwd=str(proj))
+    # outside isn't under cwd — refused.
+    assert out == {}
+
+
+def test_per_file_snapshot_swallows_read_errors(tmp_path: Path):
+    """Missing file → no snapshot, no exception."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    missing = proj / "does_not_exist.py"
+    entries = [_asst(_edit(str(missing)))]
+    out = session.extract_per_file_snapshots(entries, cwd=str(proj))
+    assert out == {}
+
+
+def test_per_file_snapshot_skips_oversize_files(tmp_path: Path):
+    """Files >5MB on disk are skipped (avoid blowing up prompt
+    composition / memory). Verifies the safety cap, not a heuristic
+    about content."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    big = proj / "binary.bin"
+    big.write_bytes(b"x" * (6 * 1024 * 1024))  # 6MB
+    entries = [_asst(_edit(str(big)))]
+    out = session.extract_per_file_snapshots(entries, cwd=str(proj))
+    assert out == {}
+
+
+def test_load_populates_snapshots_and_trajectory_from_real_files(tmp_path: Path):
+    """End-to-end: write actual file, fake a transcript that edits it,
+    confirm ctx carries both trajectory and snapshot."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    f = proj / "x.py"
+    f.write_text("def hello(): return 1\n")
+    tpath = tmp_path / "t.jsonl"
+    _write_jsonl(tpath, [_asst(_edit(str(f)))])
+
+    ctx = session.load(str(tpath), distill=False)
+    ctx.cwd = str(proj)  # session.load() doesn't get cwd from transcript;
+    # the hook normally sets it from the payload. In test we mimic by
+    # re-running snapshot extraction:
+    ctx.per_file_snapshots = session.extract_per_file_snapshots(
+        [_asst(_edit(str(f)))], cwd=str(proj),
     )
+    assert ctx.file_touch_trajectory == [(1, "Edit", str(f))]
+    assert "def hello" in ctx.per_file_snapshots[str(f)]
+
+
+# --- Active plan extraction -----------------------------------------------
+
+
+def test_extract_active_plan_finds_approved_plan():
+    entries = [
+        {"message": {"role": "user", "content": "fix the bug"}},
+        {"message": {"role": "assistant", "content": [
+            {"type": "text", "text": "looking into it"},
+        ]}},
+        {"message": {"role": "user", "content": (
+            "## Approved Plan:\n\n"
+            "Step 1: Read the file\n"
+            "Step 2: Apply the patch\n"
+            "Step 3: Add a test\n"
+        )}},
+    ]
+    plan = session.extract_active_plan(entries)
+    assert plan is not None
+    assert "Step 1: Read the file" in plan
+    assert "Step 3: Add a test" in plan
+
+
+def test_extract_active_plan_takes_latest_when_multiple():
+    entries = [
+        {"message": {"role": "user", "content": "## Approved Plan:\nFirst plan"}},
+        {"message": {"role": "assistant", "content": [
+            {"type": "text", "text": "doing first"},
+        ]}},
+        {"message": {"role": "user", "content": "## Approved Plan:\nSecond plan"}},
+    ]
+    plan = session.extract_active_plan(entries)
+    assert plan == "Second plan"
+
+
+def test_extract_active_plan_returns_none_when_absent():
+    entries = [
+        {"message": {"role": "user", "content": "fix the bug"}},
+        {"message": {"role": "assistant", "content": [
+            {"type": "text", "text": "done"},
+        ]}},
+    ]
+    assert session.extract_active_plan(entries) is None
+
+
+def test_extract_active_plan_stops_at_system_reminder():
+    """Plan body ends when the system-reminder closing block starts —
+    we don't want to pull the EXITED PLAN MODE notice into the body."""
+    entries = [
+        {"message": {"role": "user", "content": (
+            "## Approved Plan:\n"
+            "PLAN_BODY_LINE_1\n"
+            "PLAN_BODY_LINE_2\n"
+            "<system-reminder>## Exited Plan Mode\nblah blah"
+        )}},
+    ]
+    plan = session.extract_active_plan(entries)
+    assert plan is not None
+    assert "PLAN_BODY_LINE_1" in plan
+    assert "PLAN_BODY_LINE_2" in plan
+    # System-reminder content NOT included.
+    assert "Exited Plan Mode" not in plan
+    assert "blah blah" not in plan
+
+
+def test_extract_active_plan_caps_at_8kb():
+    body = "X" * 20000
+    entries = [{"message": {"role": "user", "content": f"## Approved Plan:\n{body}"}}]
+    plan = session.extract_active_plan(entries, max_bytes=8000)
+    assert len(plan) <= 8000 + 100  # leeway for truncation marker
+    assert "truncated" in plan
+
+
+# --- Recent dialogue pairs + Read in trajectory ----------------------------
+
+
+def test_recent_dialogue_pairs_extracts_last_n(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    entries = []
+    for i in range(10):
+        entries.append({"message": {"role": "assistant",
+                                    "content": [{"type": "text",
+                                                 "text": f"proposal {i}"}]}})
+        entries.append({"message": {"role": "user",
+                                    "content": f"reply {i}"}})
+    _write_jsonl(p, entries)
+    ctx = session.load(str(p), distill=False)
+    assert len(ctx.recent_dialogue_pairs) == session.MAX_DIALOGUE_PAIRS
+    # The LAST 5 (5..9).
+    assert ctx.recent_dialogue_pairs[0] == ("proposal 5", "reply 5")
+    assert ctx.recent_dialogue_pairs[-1] == ("proposal 9", "reply 9")
+
+
+def test_recent_dialogue_pairs_empty_when_no_pairs(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(p, [
+        {"message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "hi"}]}},
+        # No user reply → not a pair.
+    ])
+    ctx = session.load(str(p), distill=False)
+    assert ctx.recent_dialogue_pairs == []
+
+
+def test_read_action_enters_trajectory(tmp_path: Path):
+    """Read enters trajectory so the watchdog sees the verification
+    step before judging a downstream Edit."""
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(p, [
+        _asst({"type": "tool_use", "name": "Read",
+               "input": {"file_path": "backend/handler.go"}}),
+        _asst({"type": "tool_use", "name": "Read",
+               "input": {"file_path": "backend/types.go"}}),
+        _asst(_edit("frontend/ui.ts")),
+    ])
+    ctx = session.load(str(p), distill=False)
+    paths = [(t[1], t[2]) for t in ctx.file_touch_trajectory]
+    assert ("Read", "backend/handler.go") in paths
+    assert ("Read", "backend/types.go") in paths
+    assert ("Edit", "frontend/ui.ts") in paths
+
+
+def test_read_targets_become_snapshot_candidates(tmp_path: Path):
+    """When the agent reads upstream contracts then edits downstream,
+    the upstream files become snapshot candidates so Haiku can verify
+    the contract directly."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    (proj / "handler.go").write_text("func ServeUpdate(...) {}\n")
+    (proj / "types.go").write_text("type UpdateReq struct{}\n")
+    (proj / "ui.ts").write_text("// frontend\n")
+    entries = [
+        _asst({"type": "tool_use", "name": "Read",
+               "input": {"file_path": str(proj / "handler.go")}}),
+        _asst({"type": "tool_use", "name": "Read",
+               "input": {"file_path": str(proj / "types.go")}}),
+        _asst(_edit(str(proj / "ui.ts"))),
+    ]
+    out = session.extract_per_file_snapshots(entries, cwd=str(proj))
+    paths = set(out.keys())
+    # All three relevant files appear in the snapshot pool — Read'd
+    # contracts AND the downstream Edit target.
+    assert str(proj / "ui.ts") in paths  # most recent (Edit)
+    assert str(proj / "types.go") in paths
+    assert str(proj / "handler.go") in paths
+    assert "func ServeUpdate" in out[str(proj / "handler.go")]
+    assert "type UpdateReq" in out[str(proj / "types.go")]
+
+
+# --- Snapshot: bigger target cap + edit-region-centered window -----------
+
+
+def test_target_snapshot_gets_larger_cap_than_reference(tmp_path: Path):
+    """The file the current Edit targets gets MAX_TARGET_SNAPSHOT_BYTES;
+    other files (recently touched but not the current target) get the
+    smaller MAX_SNAPSHOT_BYTES."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    # Target file: 50KB — well under 60KB target cap, well over 25KB
+    # reference cap.
+    target = proj / "target.py"
+    target.write_text("HEADER\n" + "x" * 50_000 + "\nFOOTER\n")
+    # Reference file: same size — would head+tail under reference cap.
+    ref = proj / "ref.py"
+    ref.write_text("REFHEAD\n" + "x" * 50_000 + "\nREFTAIL\n")
+    entries = [
+        _asst(_edit(str(ref))),
+        _asst(_edit(str(target))),  # target is the LATEST
+    ]
+    out = session.extract_per_file_snapshots(
+        entries, cwd=str(proj),
+        target_file=str(target),
+    )
+    target_snap = out[str(target)]
+    ref_snap = out[str(ref)]
+    # Target fits whole — has both HEADER and FOOTER without truncation.
+    assert "HEADER" in target_snap
+    assert "FOOTER" in target_snap
+    assert "truncated" not in target_snap
+    # Reference is over its 25KB cap — head+tail with marker.
+    assert "REFHEAD" in ref_snap
+    assert "REFTAIL" in ref_snap
+    assert "truncated" in ref_snap
+
+
+def test_target_snapshot_edit_centered_when_over_budget(tmp_path: Path):
+    """When the target file exceeds MAX_TARGET_SNAPSHOT_BYTES, the
+    snapshot is sliced around `target_anchor` (the Edit's old_string)
+    so the agent's edit area is visible — including any nearby newly
+    added definitions. Regression for the prompts.py case where
+    _shorten_path was added in the middle of an 80KB file and dropped
+    by head+tail truncation."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    target = proj / "big.py"
+    # File over 60KB total: head + middle (with FRESHLY_ADDED) + tail.
+    head_pad = "head_pad_line\n" * 1000  # ~14KB
+    middle_pad = "middle_pad_line\n" * 2000  # ~32KB
+    tail_pad = "tail_pad_line\n" * 1000  # ~14KB
+    body = (
+        head_pad
+        + "FRESHLY_ADDED_FUNCTION\n"
+        + "EDIT_ANCHOR_HERE\n"
+        + middle_pad
+        + tail_pad
+    )
+    target.write_text(body)
+    assert len(body) > session.MAX_TARGET_SNAPSHOT_BYTES, (
+        f"fixture needs to exceed cap: {len(body)} <= {session.MAX_TARGET_SNAPSHOT_BYTES}"
+    )
+    entries = [_asst(_edit(str(target), old="EDIT_ANCHOR_HERE", new="x"))]
+    out = session.extract_per_file_snapshots(
+        entries,
+        cwd=str(proj),
+        target_file=str(target),
+        target_anchor="EDIT_ANCHOR_HERE",
+    )
+    snap = out[str(target)]
+    # The edit region AND the freshly-added function (right next to it)
+    # must both be visible. Without the centered slice they would be
+    # in the middle band and dropped.
+    assert "EDIT_ANCHOR_HERE" in snap
+    assert "FRESHLY_ADDED_FUNCTION" in snap
+    # And the truncation marker indicates head/tail were cut, not the
+    # edit area.
+    assert "before the edit window" in snap or "after the edit window" in snap
+
+
+def test_reference_snapshot_keeps_head_tail_when_over_budget(tmp_path: Path):
+    """Reference (non-target) files keep the old head+tail behavior —
+    no anchor available, no edit-centered slicing."""
+    proj = tmp_path / "p"
+    proj.mkdir()
+    ref = proj / "ref.py"
+    body = "HEAD\n" + ("x" * 30_000) + "\nTAIL\n"
+    ref.write_text(body)
+    entries = [_asst(_edit(str(ref)))]
+    out = session.extract_per_file_snapshots(
+        entries, cwd=str(proj),
+        # No target_file → ref.py is just a reference snapshot.
+    )
+    snap = out[str(ref)]
+    assert "HEAD" in snap and "TAIL" in snap
+    assert "truncated" in snap

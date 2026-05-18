@@ -51,11 +51,29 @@ class SessionContext:
     # Watchdog uses it to look up project_state.verdict_patterns for
     # the E2 self-calibration block.
     cwd: str = ""
-    # Per-file edit history covering ALL prior Edit/Write/MultiEdit
-    # touches in this session, grouped by file_path. Solves edit-window
-    # blindness — when a symbol's defining edit falls off the
-    # recent_actions[-5:] window, the per-file list still surfaces it.
-    per_file_edit_history: dict[str, list[str]] = field(default_factory=dict)
+    # Snapshots of the CURRENT on-disk state of up to 3 files relevant
+    # to the action being evaluated. Solves edit-window blindness:
+    # instead of reconstructing the file's state from a series of
+    # truncated diffs (which we used to do, with a language-specific
+    # regex heuristic), we hand Haiku the verbatim file content. Haiku
+    # already understands code semantics in every language — let it.
+    per_file_snapshots: dict[str, str] = field(default_factory=dict)
+    # Thin trajectory of file-touching actions: (action_index,
+    # tool_name, file_path). No content — just metadata. Helps Haiku
+    # see "agent has been thrashing on file X for 8 actions" without
+    # any content heuristics.
+    file_touch_trajectory: list[tuple[int, str, str]] = field(default_factory=list)
+    # Active plan body, when the user has approved one via ExitPlanMode
+    # in this session. None when no plan was approved. Gives the watchdog
+    # ground truth on "is this action prescribed by the user?" instead
+    # of guessing from journal workstreams.
+    active_plan: str | None = None
+    # Last N (assistant_text, user_text) pairs of dialogue before the
+    # current action. Solves multi-turn-authorization blindness: when
+    # the user's brief reply ("ставим", "go", "fais-le") refers back
+    # to an EARLIER assistant proposal, last_assistant_plan alone
+    # doesn't carry the context — the full back-and-forth does.
+    recent_dialogue_pairs: list[tuple[str | None, str]] = field(default_factory=list)
 
     @property
     def last_user_request(self) -> str | None:
@@ -64,6 +82,7 @@ class SessionContext:
 
 
 MAX_USER_REQUESTS = 5
+MAX_DIALOGUE_PAIRS = 5
 
 
 def _extract_text(content: Any) -> str | None:
@@ -144,6 +163,8 @@ def load(
     max_actions: int = 5,
     session_id: str | None = None,
     distill: bool = True,
+    current_tool_input: dict[str, Any] | None = None,
+    cwd: str | None = None,
 ) -> SessionContext:
     """Read a Claude Code transcript and return distilled context.
 
@@ -156,6 +177,8 @@ def load(
     in tests where you don't want the extra Haiku call.
     """
     ctx = SessionContext()
+    if cwd:
+        ctx.cwd = cwd
     if not transcript_path:
         return ctx
     path = Path(transcript_path)
@@ -264,96 +287,195 @@ def load(
     except Exception:
         ctx.pairs = []
 
-    # Per-file edit history. Solves the "edit-window blindness" failure
-    # mode: when an agent does 8+ Edits to the same file, the first
-    # ones fall off recent_actions[-5:] and the watchdog flags a later
-    # use of an earlier-defined symbol as undefined. This block keeps
-    # every prior touch of relevant files in front of Haiku.
+    # Trajectory of file-touching actions (no content) and per-file
+    # snapshots (verbatim disk content of relevant files). Together
+    # they solve edit-window blindness: trajectory says "agent
+    # touched X 10 times", snapshot says "this is what X looks like
+    # right now". No regex / content heuristics anywhere — Haiku
+    # parses the snapshot itself.
     try:
-        # The current action's file (derive from the last tool_use's
-        # file_path in transcript order) — gets priority for inclusion.
-        current_file: str | None = None
-        for entry in reversed(entries):
-            msg = entry.get("message") if isinstance(entry, dict) else None
-            if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                continue
-            for name, inp in _extract_tool_uses(msg.get("content")):
-                fp = inp.get("file_path")
-                if isinstance(fp, str) and fp and name in _FILE_TOUCH_TOOLS:
-                    current_file = fp
-                    break
-            if current_file:
-                break
-        ctx.per_file_edit_history = extract_per_file_edit_history(
-            entries, current_file=current_file,
+        ctx.file_touch_trajectory = extract_file_touch_trajectory(entries)
+        target_file: str | None = None
+        target_anchor: str | None = None
+        if isinstance(current_tool_input, dict):
+            fp = current_tool_input.get("file_path")
+            if isinstance(fp, str) and fp:
+                target_file = fp
+            old = current_tool_input.get("old_string")
+            if isinstance(old, str) and old.strip():
+                target_anchor = old
+        ctx.per_file_snapshots = extract_per_file_snapshots(
+            entries,
+            cwd=ctx.cwd,
+            target_file=target_file,
+            target_anchor=target_anchor,
         )
     except Exception:
-        ctx.per_file_edit_history = {}
+        ctx.file_touch_trajectory = []
+        ctx.per_file_snapshots = {}
+
+    # Active plan body — when the user has approved a plan via
+    # ExitPlanMode in this session, the prescription IS the
+    # authoritative answer to "is this action allowed?". Without
+    # this the watchdog has no signal that explicit work is
+    # plan-prescribed and may flag it as scope creep / drift.
+    try:
+        ctx.active_plan = extract_active_plan(entries)
+    except Exception:
+        ctx.active_plan = None
+
+    # Last N dialogue pairs (assistant_text, user_text). Solves
+    # multi-turn-authorization blindness — the user's brief
+    # "ставим" / "go" / "fais-le" may refer to a proposal that
+    # lives in turn N-3 rather than N-1.
+    try:
+        ctx.recent_dialogue_pairs = [
+            (p.assistant_text, p.user_text)
+            for p in ctx.pairs[-MAX_DIALOGUE_PAIRS:]
+        ]
+    except Exception:
+        ctx.recent_dialogue_pairs = []
 
     return ctx
 
 
-# --- Per-file edit history --------------------------------------------------
+# --- Per-file snapshots + trajectory ---------------------------------------
 
 
-_FILE_TOUCH_TOOLS = {"Edit", "Write", "MultiEdit"}
+# Tools that mutate file content. Used for snapshot priority — an
+# edited file's snapshot is more load-bearing than a read-only one.
+_FILE_MUTATING_TOOLS = {"Edit", "Write", "MultiEdit"}
+# Tools that touch a file (mutate OR read). Used for trajectory and
+# as the snapshot candidate pool. Including Read here closes the
+# "agent verified an upstream contract before changing downstream"
+# blind spot — Haiku sees the verification step in trajectory and
+# can inspect the verified file via snapshot.
+_FILE_TOUCH_TOOLS = _FILE_MUTATING_TOOLS | {"Read"}
+MAX_TRAJECTORY = 10
+MAX_SNAPSHOT_FILES = 3
+# Reference files (Read'd or recently touched but not the current target):
+# 25KB head+tail. Most files fit; oversized files lose the middle section.
+MAX_SNAPSHOT_BYTES = 25_000
+MAX_SNAPSHOT_HEAD = 17_000
+MAX_SNAPSHOT_TAIL = 6_000
+# Current EDIT target gets a larger budget — the file the action mutates
+# is the one Haiku must reason about most carefully. 60KB fits ~95% of
+# real source files unsplit; over that we use an edit-region-centered
+# window so the slice contains the area the agent actually changed.
+MAX_TARGET_SNAPSHOT_BYTES = 60_000
+TARGET_WINDOW_BEFORE = 25_000  # bytes before old_string anchor
+TARGET_WINDOW_AFTER = 25_000   # bytes after
+MAX_READABLE_FILE_BYTES = 5_000_000
 
 
-def _format_file_touch(
-    *,
-    action_index: int,
-    tool_name: str,
-    tool_input: dict[str, Any],
-) -> str:
-    """Compact one-line summary of one Edit/Write/MultiEdit on a file.
+def relpath_under_cwd(path: str, cwd: str) -> str:
+    """Return `path` relative to `cwd` when possible, else `path` unchanged.
 
-    Write content gets a generous preview — it IS the file's initial
-    foundation, and clipping it to a few hundred chars loses every
-    symbol definition that lives below the first screen. Edit diffs
-    stay tighter (≤80c old / ≤500c new) since each one is a delta.
+    Used to shorten absolute file paths in snapshot/trajectory rendering
+    so Haiku reads `frontend/components/MaterialsImport.vue` instead of
+    `/home/vasis/work/v-calc/frontend/components/MaterialsImport.vue`.
+    The agent's verbatim `tool_input.file_path` stays absolute — only
+    summary blocks shorten.
     """
-    if tool_name == "Edit":
-        old = _clip(tool_input.get("old_string", ""), 80)
-        new = _clip(tool_input.get("new_string", ""), 500)
-        return f"#{action_index} Edit\n  -: {old}\n  +: {new}"
-    if tool_name == "Write":
-        body = _clip(tool_input.get("content", ""), 6000)
-        return f"#{action_index} Write\n  body: {body}"
-    if tool_name == "MultiEdit":
-        edits = tool_input.get("edits") or []
-        lines = [f"#{action_index} MultiEdit ({len(edits)} edits)"]
-        for j, e in enumerate(edits[:5]):
-            if isinstance(e, dict):
-                old = _clip(e.get("old_string", ""), 80)
-                new = _clip(e.get("new_string", ""), 400)
-                lines.append(f"  edit {j} -: {old}")
-                lines.append(f"  edit {j} +: {new}")
-        if len(edits) > 5:
-            lines.append(f"  …[{len(edits) - 5} more]")
-        return "\n".join(lines)
-    return f"#{action_index} {tool_name}"
+    if not path or not cwd:
+        return path
+    try:
+        rel = Path(path).resolve(strict=False).relative_to(
+            Path(cwd).resolve(strict=False)
+        )
+        return str(rel)
+    except (ValueError, OSError):
+        return path
 
 
-def extract_per_file_edit_history(
+MAX_ACTIVE_PLAN_BYTES = 8000
+
+# Deterministic strings the Claude Code plan-mode tooling emits when a
+# plan is approved. We look for the most-recent occurrence in the
+# transcript and harvest the plan body that follows.
+_PLAN_MARKERS = (
+    "## Approved Plan:",
+    "Your plan has been saved to:",
+)
+# A close-of-block sentinel: the plan body ends when this string appears
+# (Claude Code wraps each Exited-Plan-Mode notice in a system-reminder
+# with this closing line).
+_PLAN_END_MARKERS = (
+    "<system-reminder>",
+    "## Exited Plan Mode",
+)
+
+
+def extract_active_plan(
     entries: list[dict[str, Any]],
     *,
-    current_file: str | None = None,
-    max_files: int = 3,
-    max_per_file_bytes: int = 10000,
-) -> dict[str, list[str]]:
-    """Walk transcript entries, group Edit/Write/MultiEdit touches by file.
+    max_bytes: int = MAX_ACTIVE_PLAN_BYTES,
+) -> str | None:
+    """Scan transcript backward for the most recent approved plan body.
 
-    Returns `{file_path: [formatted_touch, ...]}`. Each touch is the
-    output of `_format_file_touch`. Files included:
-      - `current_file` always, if it has touches.
-      - up to `max_files - 1` additional files by recency of last touch.
-    Each file's list is truncated to fit ≤max_per_file_bytes (oldest
-    touches drop first — we want recent changes most visible, but the
-    DEFINITION often happens in the FIRST edit; the cap is generous
-    enough that real series of 10-15 edits to one file still fit).
+    Returns the plan body text (capped at `max_bytes`) or None when no
+    plan-mode approval was ever recorded. Pure transcript scrape, no
+    Haiku, no markdown parsing — finds the verbatim string emitted by
+    Claude Code's ExitPlanMode tooling and slices forward from there.
+
+    Multiple plans in a session: the LATEST approval wins. Each new
+    plan-approval supersedes prior ones (the user re-entered plan mode
+    deliberately).
     """
-    per_file: dict[str, list[tuple[int, str, str]]] = {}  # (idx, kind, line)
-    last_touch_idx: dict[str, int] = {}
+    # Walk entries from newest to oldest, looking inside any text block
+    # (user OR assistant role — the plan body comes back as a tool
+    # result wrapped in a user-role system-reminder, but the format
+    # varies between Claude Code versions, so check both).
+    for entry in reversed(entries):
+        msg = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        text = _extract_text(content)
+        if not text:
+            continue
+        # Locate the latest plan marker inside this entry.
+        best_marker_pos = -1
+        for marker in _PLAN_MARKERS:
+            pos = text.rfind(marker)
+            if pos > best_marker_pos:
+                best_marker_pos = pos
+        if best_marker_pos < 0:
+            continue
+        body_start = best_marker_pos
+        # Trim leading marker line so the plan body starts at its
+        # first content line.
+        nl = text.find("\n", body_start)
+        if nl > 0:
+            body_start = nl + 1
+        # Find the earliest end-marker after body_start, if any.
+        body_end = len(text)
+        for marker in _PLAN_END_MARKERS:
+            pos = text.find(marker, body_start)
+            if 0 <= pos < body_end:
+                body_end = pos
+        body = text[body_start:body_end].strip()
+        if not body:
+            continue
+        if len(body) > max_bytes:
+            body = body[:max_bytes] + (
+                f"\n\n[…plan body truncated at {max_bytes} bytes; full text in plan file…]"
+            )
+        return body
+    return None
+
+
+def extract_file_touch_trajectory(
+    entries: list[dict[str, Any]],
+) -> list[tuple[int, str, str]]:
+    """Walk entries, return last MAX_TRAJECTORY (action_index, tool, path)
+    tuples for Edit/Write/MultiEdit actions.
+
+    Pure metadata. No file content, no heuristics — just "what files did
+    the agent touch and when". Haiku can spot repeated-thrashing patterns
+    from this without any pre-computed signal.
+    """
+    out: list[tuple[int, str, str]] = []
     action_index = 0
     for entry in entries:
         msg = entry.get("message") if isinstance(entry, dict) else None
@@ -366,47 +488,173 @@ def extract_per_file_edit_history(
             fp = inp.get("file_path")
             if not isinstance(fp, str) or not fp:
                 continue
-            line = _format_file_touch(
-                action_index=action_index, tool_name=name, tool_input=inp,
-            )
-            per_file.setdefault(fp, []).append((action_index, name, line))
-            last_touch_idx[fp] = action_index
+            out.append((action_index, name, fp))
+    return out[-MAX_TRAJECTORY:]
 
-    if not per_file:
+
+def _read_file_snapshot(
+    file_path: str,
+    *,
+    cwd: str,
+    max_bytes: int = MAX_SNAPSHOT_BYTES,
+    max_head: int = MAX_SNAPSHOT_HEAD,
+    max_tail: int = MAX_SNAPSHOT_TAIL,
+    anchor: str | None = None,
+    window_before: int = TARGET_WINDOW_BEFORE,
+    window_after: int = TARGET_WINDOW_AFTER,
+) -> str | None:
+    """Read `file_path` from disk and return its content as a string.
+
+    Returns None when:
+      - path resolution fails,
+      - resolved path escapes `cwd` (avoid leaking arbitrary fs),
+      - file is missing / unreadable,
+      - file is larger than MAX_READABLE_FILE_BYTES (5MB).
+
+    Truncation policy when content exceeds `max_bytes`:
+      - If `anchor` is provided AND found in content: slice an
+        edit-region-centered window (`window_before` bytes before the
+        anchor + `window_after` bytes after). This is the case for
+        the CURRENT EDIT TARGET — we know where the change happened,
+        we show around it. The head+tail dance loses the middle, which
+        is exactly where newly-added code typically lives.
+      - Otherwise: head + truncation marker + tail. Size-budget cut,
+        no claim about meaning.
+
+    Both modes emit an explicit `[…truncated…]` marker so Haiku knows
+    bytes were dropped.
+    """
+    try:
+        raw_path = Path(file_path)
+        if not raw_path.is_absolute():
+            if not cwd:
+                return None
+            raw_path = Path(cwd) / file_path
+        resolved = raw_path.resolve(strict=False)
+        if cwd:
+            try:
+                resolved.relative_to(Path(cwd).resolve(strict=False))
+            except ValueError:
+                # Path escapes cwd — refuse.
+                return None
+        if not resolved.is_file():
+            return None
+        try:
+            size = resolved.stat().st_size
+        except OSError:
+            return None
+        if size > MAX_READABLE_FILE_BYTES:
+            return None
+        with resolved.open("r", encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return None
+    except Exception:
+        return None
+
+    if len(content) <= max_bytes:
+        return content
+
+    # Edit-region-centered window: when the caller knows where the
+    # action's edit landed (anchor = old_string for Edit/MultiEdit),
+    # slice around that point. This preserves the area the agent
+    # actually changed, including any nearby just-added definitions.
+    if anchor:
+        anchor_pos = content.find(anchor)
+        if anchor_pos >= 0:
+            start = max(0, anchor_pos - window_before)
+            end = min(len(content), anchor_pos + len(anchor) + window_after)
+            slice_text = content[start:end]
+            head_dropped = start
+            tail_dropped = len(content) - end
+            parts: list[str] = []
+            if head_dropped > 0:
+                parts.append(
+                    f"[…{head_dropped} bytes "
+                    f"({content[:start].count(chr(10))} lines) before the edit window…]\n\n"
+                )
+            parts.append(slice_text)
+            if tail_dropped > 0:
+                parts.append(
+                    f"\n\n[…{tail_dropped} bytes "
+                    f"({content[end:].count(chr(10))} lines) after the edit window…]"
+                )
+            return "".join(parts)
+
+    # Head/tail split with a clear marker line.
+    head = content[:max_head]
+    tail = content[-max_tail:]
+    dropped = len(content) - max_head - max_tail
+    head_lines = head.count("\n")
+    tail_lines = tail.count("\n")
+    dropped_lines = content.count("\n") - head_lines - tail_lines
+    marker = (
+        f"\n\n[…truncated middle of file: {dropped} bytes / "
+        f"~{dropped_lines} lines dropped to fit prompt budget…]\n\n"
+    )
+    return head + marker + tail
+
+
+def extract_per_file_snapshots(
+    entries: list[dict[str, Any]],
+    *,
+    cwd: str,
+    max_files: int = MAX_SNAPSHOT_FILES,
+    max_bytes_per_file: int = MAX_SNAPSHOT_BYTES,
+    target_file: str | None = None,
+    target_anchor: str | None = None,
+) -> dict[str, str]:
+    """Read up to `max_files` files most relevant to the recent action
+    stream, return `{file_path: snapshot_text}`.
+
+    Files are picked from the Edit/Write/MultiEdit trajectory in the
+    transcript, ordered by recency of last touch. This covers the
+    vast majority of file mutations the agent makes; the rare case of
+    Bash-mediated file rewrites (`> path`, `sed -i`, etc.) is
+    deliberately not handled here — a filesystem-mtime sweep was
+    considered and rejected as too expensive on large projects.
+
+    When `target_file` is given, that file gets the larger
+    MAX_TARGET_SNAPSHOT_BYTES budget. If `target_anchor` (typically the
+    Edit's `old_string`) is also provided AND the target exceeds budget,
+    the snapshot is sliced as a window centered on the anchor — the
+    edit region — rather than head+tail. This prevents the common case
+    where a freshly-added utility function lives in the middle of a
+    growing file and gets dropped by head+tail truncation.
+
+    Each snapshot is the file's CURRENT on-disk content (post any
+    edits already applied). Reading is best-effort — failures, paths
+    outside `cwd`, and oversize files are silently skipped.
+    """
+    last_touch_idx: dict[str, int] = {}
+    action_index = 0
+    for entry in entries:
+        msg = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for name, inp in _extract_tool_uses(msg.get("content")):
+            action_index += 1
+            if name not in _FILE_TOUCH_TOOLS:
+                continue
+            fp = inp.get("file_path")
+            if isinstance(fp, str) and fp:
+                last_touch_idx[fp] = action_index
+
+    if not last_touch_idx:
         return {}
 
-    # Pick which files to include: current_file first, then others by
-    # most recent touch.
-    candidates: list[str] = []
-    if current_file and current_file in per_file:
-        candidates.append(current_file)
-    others = sorted(
-        (fp for fp in per_file if fp != current_file),
-        key=lambda f: -last_touch_idx.get(f, 0),
-    )
-    for fp in others:
-        if len(candidates) >= max_files:
-            break
-        candidates.append(fp)
-
-    # Apply per-file byte budget. When over, drop oldest Edit/MultiEdit
-    # first (deltas — losing one is acceptable). Only drop Writes as a
-    # last resort — Write is the file's foundation; losing it loses
-    # symbol definitions.
-    out: dict[str, list[str]] = {}
-    for fp in candidates:
-        entries_local = list(per_file[fp])
-        total = sum(len(line) for _, _, line in entries_local) + len(entries_local)
-        while total > max_per_file_bytes and len(entries_local) > 1:
-            # Prefer to drop oldest non-Write.
-            drop_idx = None
-            for i, (_, kind, _line) in enumerate(entries_local):
-                if kind != "Write":
-                    drop_idx = i
-                    break
-            if drop_idx is None:
-                drop_idx = 0  # only Writes left — drop oldest Write
-            _, _, dropped = entries_local.pop(drop_idx)
-            total -= len(dropped) + 1
-        out[fp] = [line for _, _, line in entries_local]
+    chosen = sorted(last_touch_idx, key=lambda f: -last_touch_idx[f])[:max_files]
+    out: dict[str, str] = {}
+    for fp in chosen:
+        if fp == target_file:
+            snap = _read_file_snapshot(
+                fp,
+                cwd=cwd,
+                max_bytes=MAX_TARGET_SNAPSHOT_BYTES,
+                anchor=target_anchor,
+            )
+        else:
+            snap = _read_file_snapshot(fp, cwd=cwd, max_bytes=max_bytes_per_file)
+        if snap is not None:
+            out[fp] = snap
     return out
