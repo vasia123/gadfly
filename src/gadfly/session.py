@@ -307,27 +307,29 @@ def _format_file_touch(
 ) -> str:
     """Compact one-line summary of one Edit/Write/MultiEdit on a file.
 
-    Tight previews (≤80c old / ≤300c new) keep per-file budget reasonable
-    while still surfacing the symbols introduced.
+    Write content gets a generous preview — it IS the file's initial
+    foundation, and clipping it to a few hundred chars loses every
+    symbol definition that lives below the first screen. Edit diffs
+    stay tighter (≤80c old / ≤500c new) since each one is a delta.
     """
     if tool_name == "Edit":
         old = _clip(tool_input.get("old_string", ""), 80)
-        new = _clip(tool_input.get("new_string", ""), 300)
+        new = _clip(tool_input.get("new_string", ""), 500)
         return f"#{action_index} Edit\n  -: {old}\n  +: {new}"
     if tool_name == "Write":
-        body = _clip(tool_input.get("content", ""), 300)
+        body = _clip(tool_input.get("content", ""), 6000)
         return f"#{action_index} Write\n  body: {body}"
     if tool_name == "MultiEdit":
         edits = tool_input.get("edits") or []
         lines = [f"#{action_index} MultiEdit ({len(edits)} edits)"]
-        for j, e in enumerate(edits[:3]):
+        for j, e in enumerate(edits[:5]):
             if isinstance(e, dict):
                 old = _clip(e.get("old_string", ""), 80)
-                new = _clip(e.get("new_string", ""), 200)
+                new = _clip(e.get("new_string", ""), 400)
                 lines.append(f"  edit {j} -: {old}")
                 lines.append(f"  edit {j} +: {new}")
-        if len(edits) > 3:
-            lines.append(f"  …[{len(edits) - 3} more]")
+        if len(edits) > 5:
+            lines.append(f"  …[{len(edits) - 5} more]")
         return "\n".join(lines)
     return f"#{action_index} {tool_name}"
 
@@ -337,7 +339,7 @@ def extract_per_file_edit_history(
     *,
     current_file: str | None = None,
     max_files: int = 3,
-    max_per_file_bytes: int = 6000,
+    max_per_file_bytes: int = 10000,
 ) -> dict[str, list[str]]:
     """Walk transcript entries, group Edit/Write/MultiEdit touches by file.
 
@@ -350,7 +352,7 @@ def extract_per_file_edit_history(
     DEFINITION often happens in the FIRST edit; the cap is generous
     enough that real series of 10-15 edits to one file still fit).
     """
-    per_file: dict[str, list[tuple[int, str]]] = {}
+    per_file: dict[str, list[tuple[int, str, str]]] = {}  # (idx, kind, line)
     last_touch_idx: dict[str, int] = {}
     action_index = 0
     for entry in entries:
@@ -367,7 +369,7 @@ def extract_per_file_edit_history(
             line = _format_file_touch(
                 action_index=action_index, tool_name=name, tool_input=inp,
             )
-            per_file.setdefault(fp, []).append((action_index, line))
+            per_file.setdefault(fp, []).append((action_index, name, line))
             last_touch_idx[fp] = action_index
 
     if not per_file:
@@ -387,13 +389,24 @@ def extract_per_file_edit_history(
             break
         candidates.append(fp)
 
-    # Apply per-file byte budget. Drop oldest touches first when over.
+    # Apply per-file byte budget. When over, drop oldest Edit/MultiEdit
+    # first (deltas — losing one is acceptable). Only drop Writes as a
+    # last resort — Write is the file's foundation; losing it loses
+    # symbol definitions.
     out: dict[str, list[str]] = {}
     for fp in candidates:
-        touches = [line for _, line in per_file[fp]]
-        total = sum(len(s) for s in touches) + len(touches)  # +newlines
-        while total > max_per_file_bytes and len(touches) > 1:
-            dropped = touches.pop(0)
+        entries_local = list(per_file[fp])
+        total = sum(len(line) for _, _, line in entries_local) + len(entries_local)
+        while total > max_per_file_bytes and len(entries_local) > 1:
+            # Prefer to drop oldest non-Write.
+            drop_idx = None
+            for i, (_, kind, _line) in enumerate(entries_local):
+                if kind != "Write":
+                    drop_idx = i
+                    break
+            if drop_idx is None:
+                drop_idx = 0  # only Writes left — drop oldest Write
+            _, _, dropped = entries_local.pop(drop_idx)
             total -= len(dropped) + 1
-        out[fp] = touches
+        out[fp] = [line for _, _, line in entries_local]
     return out

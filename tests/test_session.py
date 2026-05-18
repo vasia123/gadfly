@@ -316,3 +316,26 @@ def test_per_file_edit_history_empty_when_no_file_touches(tmp_path: Path):
     ])
     ctx = session.load(str(p), distill=False)
     assert ctx.per_file_edit_history == {}
+
+
+def test_per_file_edit_history_preserves_write_under_budget_pressure():
+    """When budget is tight, oldest Edits drop first — Write (the file's
+    foundation, contains all symbol definitions) MUST stay. Regression
+    for the bizprofit LIFECYCLE_LABELS false positive."""
+    write_content = "export const LIFECYCLE_LABELS = {sale: 'Sale'}\n" + "x" * 5000
+    entries = [_asst({
+        "type": "tool_use", "name": "Write",
+        "input": {"file_path": "f.ts", "content": write_content},
+    })]
+    # 30 follow-up edits to the same file.
+    for i in range(30):
+        entries.append(_asst(_edit("f.ts", old="x", new=f"new_{i}_" + "y" * 100)))
+    out = session.extract_per_file_edit_history(
+        entries, current_file="f.ts", max_per_file_bytes=2000,
+    )
+    joined = "\n".join(out["f.ts"])
+    # Write content (with LIFECYCLE_LABELS) MUST survive.
+    assert "LIFECYCLE_LABELS" in joined, (
+        f"Write was dropped under budget pressure — symbol lost. "
+        f"history: {out['f.ts']!r}"
+    )
