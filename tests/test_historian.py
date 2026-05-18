@@ -190,6 +190,51 @@ def test_distill_empty_transcript_writes_empty_digest(isolated, captured_ref):
     assert ps.read_raw_digest(cwd, "empty") is not None
 
 
+def test_distill_partial_success_preserves_completed_chunks(isolated, captured_ref, monkeypatch):
+    """When a multi-chunk transcript fails mid-way, the daemon must NOT
+    throw away the chunks that already succeeded — that's worse than
+    saving them with a partial marker."""
+    monkeypatch.setattr(h, "MAX_EVENTS_PER_CHUNK", 3)
+    cwd = "/proj/partial-success"
+    tpath = isolated / "big.jsonl"
+    # 4 user/assistant pairs → ~3 chunks at MAX_EVENTS_PER_CHUNK=3.
+    entries = []
+    for i in range(4):
+        entries.append(_msg("user", f"step {i}"))
+        entries.append(_msg("assistant", [_text_block(f"working on {i}")]))
+    _write_transcript(tpath, entries)
+
+    call_count = {"n": 0}
+
+    async def runner(prompt, options):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            # Second chunk fails — but first chunk should have left data.
+            raise RuntimeError("midway boom")
+        captured_ref["c"].payload = {
+            "new_promises": [{"title": f"p{call_count['n']}",
+                              "evidence_quote": "ev"}],
+            "fulfilled_promises": [], "new_corrections": [],
+            "knowledge_updates": [],
+        }
+
+    res = h.distill_session(
+        cwd=cwd, session_id="partial",
+        transcript_path=tpath, transcript_mtime=tpath.stat().st_mtime,
+        run_query=runner,
+    )
+    assert res.error and "boom" in res.error
+    # Raw digest WAS written with chunks_completed=1, partial=True, and
+    # the one finding from chunk 1.
+    raw = ps.read_raw_digest(cwd, "partial")
+    assert raw is not None, "partial digest must be persisted, not lost"
+    assert raw["partial"] is True
+    assert raw["chunks_completed"] == 1
+    assert len(raw["new_promises"]) == 1
+    # Failure marker also recorded so we know the digest is incomplete.
+    assert ps.get_distill_attempts(cwd, "partial") == 1
+
+
 def test_distill_error_does_not_write_raw_digest(isolated, captured_ref):
     """Root-cause fix: on Haiku error, do NOT write an empty raw digest.
     Otherwise the session gets marked 'digested' and we lose its data
@@ -359,6 +404,92 @@ def test_distill_emits_historian_event_in_audit_log(isolated, captured_ref):
     assert len(events) == 1
     assert events[0]["cwd"] == cwd
     assert events[0]["error"] is None
+
+
+# --- Cross-session fulfillment (extractor side) ----------------------------
+
+
+def test_distill_injects_open_promises_block_when_state_has_open(isolated, captured_ref):
+    """Extractor user message must carry an <open_promises> block listing
+    currently-open promises that lexically overlap the session — Haiku
+    can only fulfil what's in front of it."""
+    cwd = "/proj/cross-fulfill"
+    # Seed an open promise in this cwd's state.
+    seed = {
+        "session_id": "old", "ts": 100.0,
+        "new_promises": [{"title": "wire daemon telemetry",
+                          "evidence_quote": "TODO next",
+                          "action_index": 1}],
+        "fulfilled_promises": [], "new_corrections": [],
+        "knowledge_updates": [],
+    }
+    ps.write_raw_digest(cwd, "old", seed)
+    state = ps.rebuild_from_raw(cwd)
+    ps.save_state(state)
+    pid = next(iter(state.promises.keys()))
+    assert state.promises[pid].status == "open"
+
+    # New session whose transcript overlaps the promise title.
+    tpath = isolated / "new.jsonl"
+    _write_transcript(tpath, [
+        _msg("user", "let's wire the daemon telemetry beacon"),
+        _msg("assistant", [_text_block("done, telemetry is now logged every 30 polls")]),
+    ])
+
+    captured_prompt: dict[str, str] = {}
+
+    async def runner(prompt: str, options) -> None:
+        captured_prompt["p"] = prompt
+        captured_ref["c"].payload = {
+            "new_promises": [], "fulfilled_promises": [],
+            "new_corrections": [], "knowledge_updates": [],
+            "fulfilled_promise_ids": [pid],
+        }
+
+    res = h.distill_session(
+        cwd=cwd, session_id="new",
+        transcript_path=tpath, transcript_mtime=tpath.stat().st_mtime,
+        run_query=runner,
+    )
+    assert res.error is None
+    assert "<open_promises>" in captured_prompt["p"]
+    assert pid in captured_prompt["p"]
+    # Persisted to raw and applied on rebuild.
+    raw = ps.read_raw_digest(cwd, "new")
+    assert raw is not None
+    assert raw["fulfilled_promise_ids"] == [pid]
+    rebuilt = ps.rebuild_from_raw(cwd)
+    assert rebuilt.promises[pid].status == "fulfilled"
+    assert rebuilt.promises[pid].fulfilled_in_session == "new"
+
+
+def test_distill_no_open_promises_block_when_state_empty(isolated, captured_ref):
+    """When the project has no open promises, the prompt should not
+    carry an <open_promises> section — saves tokens, no false invitation
+    for Haiku to invent ids."""
+    cwd = "/proj/empty-state"
+    tpath = isolated / "s.jsonl"
+    _write_transcript(tpath, [_msg("user", "hi"),
+                              _msg("assistant", [_text_block("ok")])])
+    captured_prompt: dict[str, str] = {}
+
+    async def runner(prompt: str, options) -> None:
+        captured_prompt["p"] = prompt
+        captured_ref["c"].payload = {
+            "new_promises": [], "fulfilled_promises": [],
+            "new_corrections": [], "knowledge_updates": [],
+            "fulfilled_promise_ids": [],
+        }
+
+    h.distill_session(
+        cwd=cwd, session_id="s",
+        transcript_path=tpath, transcript_mtime=tpath.stat().st_mtime,
+        run_query=runner,
+    )
+    # The block has its own heading line "## <open_promises>"; the
+    # task-footer instructions mention `<open_promises>` inline, so we
+    # gate specifically on the section heading.
+    assert "## <open_promises>" not in captured_prompt["p"]
 
 
 # --- Heartbeat reading ------------------------------------------------------
@@ -626,15 +757,17 @@ def test_status_exits_zero_when_no_backlog(isolated, capsys):
 
 def test_find_relevant_priors_keyword_overlap(isolated):
     """H6: keyword-overlap retrieves the right promise."""
+    import time as _t
     cwd = "/proj/retrieval"
+    now = _t.time()
     digests = [
         _digest_for_retrieval(
-            "s1", 100.0,
+            "s1", now - 86400,
             promises=[{"title": "implement marlin EXL3 benchmark",
                        "evidence_quote": "I'll add the marlin bench later"}]
         ),
         _digest_for_retrieval(
-            "s2", 200.0,
+            "s2", now - 43200,
             promises=[{"title": "rewrite documentation",
                        "evidence_quote": "TODO docs"}]
         ),
@@ -695,6 +828,45 @@ def test_find_relevant_priors_respects_max():
 
     hits = h.find_relevant_priors(cwd, workstream_title="thing", max_results=3)
     assert len(hits) <= 3
+
+
+def test_find_relevant_priors_recency_penalty(isolated):
+    """Old promises rank below recent ones at the same keyword score.
+    Prevents the stale-corpus-injection problem (bizprofit 'watchdog'
+    keyword surfacing month-old promises).
+
+    Distinct titles → distinct promise ids; both share topic tokens
+    ('watchdog', 'calibration') with the query so keyword scores are
+    similar; recency penalty differentiates them."""
+    import time as _t
+    cwd = "/proj/recency"
+    now = _t.time()
+    old_ts = now - 28 * 24 * 3600   # 4 weeks → ~-0.2 penalty
+    new_ts = now - 1 * 24 * 3600    # 1 day → ~negligible penalty
+    ps.write_raw_digest(cwd, "old_sess", _digest_for_retrieval(
+        "old_sess", old_ts,
+        promises=[{"title": "watchdog calibration threshold tuning",
+                   "evidence_quote": "I'll tune the threshold later"}]))
+    ps.write_raw_digest(cwd, "new_sess", _digest_for_retrieval(
+        "new_sess", new_ts,
+        promises=[{"title": "watchdog calibration flake investigation",
+                   "evidence_quote": "intermittent flake to investigate"}]))
+    state = ps.rebuild_from_raw(cwd)
+    ps.save_state(state)
+    # Sanity: two distinct promises exist.
+    assert len(state.promises) == 2
+
+    hits = h.find_relevant_priors(
+        cwd, workstream_title="watchdog calibration work",
+        file_paths=[],
+    )
+    assert len(hits) >= 1, "expected at least one match"
+    # Newest should be first.
+    assert hits[0].source_session == "new_sess", (
+        f"recency should prefer 1-day-old over 4-weeks-old; got "
+        f"top={hits[0].source_session} (score={hits[0].score:.3f}), "
+        f"all={[(h_.source_session, round(h_.score,3)) for h_ in hits]}"
+    )
 
 
 def test_render_priors_block_includes_evidence(isolated):

@@ -49,6 +49,25 @@ SCHEMA_VERSION = 1
 CORRECTION_PROMOTION_SESSIONS = 2
 SUBSYSTEM_PROMOTION_FILE_MENTIONS = 3
 
+# Age-out: how long an open promise stays "fresh" before the aggregator
+# transitions it to status="aged-out". Tuned for typical week-long
+# workstreams. Manual override: edit raw/<sid>.json or revoke via CLI.
+PROMISE_AGE_OUT_DAYS = 7
+PROMISE_AGE_OUT_S = PROMISE_AGE_OUT_DAYS * 24 * 3600
+
+# Auto-fulfillment heuristic — completion verbs.
+# Conservative list: words that strongly indicate a task was COMPLETED
+# (not just discussed, investigated, planned). Past-tense / participle
+# forms preferred. Tweak if false-positives prove common.
+_COMPLETION_VERBS = {
+    "done", "completed", "implemented", "landed", "shipped", "fixed",
+    "resolved", "merged", "deployed", "added", "wired",
+}
+# Minimum distinct promise-nouns that must appear in a later digest's
+# text for auto-fulfillment to fire. ≥2 is conservative; 1 alone is
+# too generic (any session mentioning the topic would count).
+_AUTOFULFILL_MIN_NOUNS = 2
+
 # Caps to keep entries bounded.
 MAX_EVIDENCE_QUOTE = 200
 MAX_NOTES = 1500
@@ -271,6 +290,135 @@ class QuarantineItem:
 
 
 @dataclass
+class VerdictPattern:
+    """Aggregate value-tracker for a recurring verdict pattern.
+
+    Watchdog's analog of priors' `usefulness_score`. Without it, the
+    watchdog flags the same pattern forever — even when historical
+    evidence says the agent's behavior was correct each time. This is
+    the MemoryArena lesson applied to the watchdog itself: storage of
+    flags is cheap, USE of them for self-calibration is the hard part.
+
+    A pattern is keyed by `fingerprint`: a deterministic kebab string
+    derived from (marker, normalised noun-keywords of the reason).
+    Two flags with reason "Symptom fix: composable does not exist yet"
+    and "Symptom fix: composable not yet defined" should hash to the
+    same fingerprint so we accumulate across phrasings.
+
+    The signed `value_score` captures net judgment-quality across
+    historical resolutions:
+      +1 when a workstream that carried this flag closed `done` AND
+         the agent visibly complied with the suggestion.
+      -1 when a workstream closed `done` AND the agent did NOT comply
+         (the flag was correctly ignored — likely a false positive).
+       0 (no change) when the workstream was `abandoned` or evidence
+         is ambiguous (don't penalise nor reward).
+    Bounded to [-10, +10] so a long-stale pattern can still recover.
+    """
+
+    fingerprint: str          # deterministic key (see derive_fingerprint)
+    marker: str               # symptom | rationalization | other
+    sample_reason: str        # one canonical phrasing for human review
+    total_flags: int = 0      # how many times this pattern fired
+    value_score: int = 0      # bounded [-10, +10]
+    last_seen_session: str = ""
+    last_seen_ts: float = 0.0
+    sample_workstream_ids: list[str] = field(default_factory=list)  # up to 5
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fingerprint": self.fingerprint,
+            "marker": self.marker,
+            "sample_reason": self.sample_reason,
+            "total_flags": self.total_flags,
+            "value_score": self.value_score,
+            "last_seen_session": self.last_seen_session,
+            "last_seen_ts": self.last_seen_ts,
+            "sample_workstream_ids": list(self.sample_workstream_ids)[-5:],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "VerdictPattern":
+        return cls(
+            fingerprint=str(d.get("fingerprint") or ""),
+            marker=str(d.get("marker") or "other"),
+            sample_reason=str(d.get("sample_reason") or "")[:280],
+            total_flags=int(d.get("total_flags") or 0),
+            value_score=max(-10, min(10, int(d.get("value_score") or 0))),
+            last_seen_session=str(d.get("last_seen_session") or ""),
+            last_seen_ts=float(d.get("last_seen_ts") or 0.0),
+            sample_workstream_ids=[
+                str(s) for s in (d.get("sample_workstream_ids") or [])
+                if isinstance(s, str)
+            ],
+        )
+
+
+_REASON_STOP = {
+    # English
+    "the", "a", "an", "and", "or", "of", "in", "to", "for", "on", "with",
+    "is", "are", "was", "were", "be", "been", "by", "as", "at", "from",
+    "this", "that", "these", "those", "it", "its", "without", "but", "not",
+    "than", "then", "when", "where", "why", "how", "what", "which",
+    "agent", "code", "fix", "edit", "file", "yet", "should", "would",
+    "could", "have", "has", "had", "will", "may", "might", "can",
+}
+
+
+def derive_pattern_fingerprint(marker: str, reason: str) -> str:
+    """Deterministic kebab-slug for grouping similar flags.
+
+    The hard part: phrasings that share a TOPIC but use different
+    verbs need to collapse:
+
+      'Symptom fix: composable does not exist yet'
+      'Symptom fix: useMail composable not yet defined'
+      'Symptom fix: composable methods are not implemented'
+                                  ↓
+      symptom-composable  (single longest content noun)
+
+    Strategy:
+      1. Strip marker prefix ('Symptom fix:', 'Rationalization:') so the
+         marker word doesn't appear in the topic token.
+      2. Keep tokens ≥6 chars (content-y, not generic helpers).
+      3. Filter stop words.
+      4. Take the SINGLE longest token. Aggressive but lossy-in-the-
+         right-direction: better to over-group similar flags into one
+         pattern than to never accumulate evidence.
+
+    Drawback: distinct topics that happen to share a long word collide
+    (e.g. flags about 'authentication' and flags about 'authorization'
+    both → 'auth...'). Acceptable trade in v1; revisit if false-merge
+    rate matters in real corpora.
+    """
+    marker_norm = (marker or "other").lower().split(":", 1)[0].strip()
+    if marker_norm not in ("symptom", "rationalization", "other"):
+        marker_norm = "other"
+
+    # Strip "Symptom fix:" / "Rationalization:" prefix so the marker
+    # word doesn't end up as a content token.
+    body = reason or ""
+    m = re.match(r"\s*(symptom\s+fix|rationalization)\s*[:\.]\s*", body, re.IGNORECASE)
+    if m:
+        body = body[m.end():]
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"[^A-Za-z0-9_]+", body.lower()):
+        if len(raw) < 6 or raw in _REASON_STOP or raw in seen:
+            continue
+        seen.add(raw)
+        candidates.append(raw)
+
+    if not candidates:
+        return f"{marker_norm}-empty"
+
+    # Pick the longest. Ties broken alphabetically for determinism.
+    candidates.sort(key=lambda t: (-len(t), t))
+    return f"{marker_norm}-{candidates[0]}"
+
+
+@dataclass
 class RevokedEntry:
     """Audit trail of revoked findings. Raw evidence is preserved
     elsewhere; this records why something was excluded."""
@@ -304,6 +452,11 @@ class ProjectState:
     quarantine: list[QuarantineItem] = field(default_factory=list)
     digested_sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
     revoked: list[RevokedEntry] = field(default_factory=list)
+    # E2: watchdog self-learning. Recurring flag patterns keyed by
+    # fingerprint, with a signed value_score (-10..+10). Surfaced to
+    # the verdict prompt so the watchdog can recognise patterns it has
+    # historically been wrong about and stay silent.
+    verdict_patterns: dict[str, VerdictPattern] = field(default_factory=dict)
     prompt_sha: str = ""
     schema_version: int = SCHEMA_VERSION
     ts: float = 0.0
@@ -319,6 +472,7 @@ class ProjectState:
             "quarantine": [q.to_dict() for q in self.quarantine],
             "digested_sessions": dict(self.digested_sessions),
             "revoked": [r.to_dict() for r in self.revoked],
+            "verdict_patterns": {k: v.to_dict() for k, v in self.verdict_patterns.items()},
             "prompt_sha": self.prompt_sha,
             "schema_version": self.schema_version,
             "ts": self.ts,
@@ -351,6 +505,11 @@ class ProjectState:
             for r in (d.get("revoked") or [])
             if isinstance(r, dict)
         ]
+        verdict_patterns = {
+            k: VerdictPattern.from_dict(v)
+            for k, v in (d.get("verdict_patterns") or {}).items()
+            if isinstance(v, dict)
+        }
         return cls(
             cwd=str(d.get("cwd") or ""),
             promises=promises,
@@ -359,6 +518,7 @@ class ProjectState:
             quarantine=quarantine,
             digested_sessions=dict(d.get("digested_sessions") or {}),
             revoked=revoked,
+            verdict_patterns=verdict_patterns,
             prompt_sha=str(d.get("prompt_sha") or ""),
             schema_version=int(d.get("schema_version") or SCHEMA_VERSION),
             ts=float(d.get("ts") or 0.0),
@@ -799,7 +959,55 @@ def aggregate(
     state.quarantine.sort(key=lambda q: (q.kind, str(q.payload.get("id") or "")))
     state.revoked = list(revoked)
     state.ts = max_ts
+
+    # Cross-session fulfillment: each digest carries
+    # `fulfilled_promise_ids` — verbatim ids of open promises that
+    # Haiku judged as completed during that session. Pure deterministic
+    # application here keeps rebuild Haiku-free.
+    _apply_cross_session_fulfillments(state, digests)
+
+    # Age-out pass: promises whose last_seen_ts is older than the
+    # latest digest by > PROMISE_AGE_OUT_S transition to aged-out.
+    # Helps in mature corpora; doesn't fire on projects < 7 days old.
+    # Runs AFTER fulfillment so a stale promise that just got fulfilled
+    # is correctly labelled "fulfilled", not "aged-out".
+    if max_ts > 0:
+        cutoff = max_ts - PROMISE_AGE_OUT_S
+        for p in state.promises.values():
+            if p.status == "open" and p.last_seen_ts and p.last_seen_ts < cutoff:
+                p.status = "aged-out"
     return state
+
+
+def _apply_cross_session_fulfillments(
+    state: ProjectState,
+    digests: list[dict[str, Any]],
+) -> None:
+    """Apply per-digest `fulfilled_promise_ids` to the promise store.
+
+    Iterates digests in chronological order (the caller already sorts).
+    For each promise id listed, if the promise exists and is currently
+    open, transition it to fulfilled and record the session that closed
+    it. Unknown ids and already-non-open promises are silently skipped —
+    Haiku may have returned a verbatim id from a candidate list whose
+    promise was later revoked, or two sessions may both claim to have
+    completed the same promise (first writer wins).
+    """
+    for digest in digests:
+        sid = str(digest.get("session_id") or "")
+        ts = float(digest.get("ts") or 0.0)
+        ids = digest.get("fulfilled_promise_ids") or []
+        if not isinstance(ids, list):
+            continue
+        for pid in ids:
+            if not isinstance(pid, str) or not pid:
+                continue
+            p = state.promises.get(pid)
+            if p is None or p.status != "open":
+                continue
+            p.status = "fulfilled"
+            p.fulfilled_in_session = sid
+            p.last_seen_ts = max(p.last_seen_ts, ts)
 
 
 # --- Promote / revoke actions ----------------------------------------------
@@ -915,6 +1123,51 @@ def revoke_finding(cwd: str, finding_id: str, *, reason: str = "") -> tuple[bool
     ))
     save_state(state)
     return (True, f"revoked {kind} {finding_id}")
+
+
+def update_verdict_pattern(
+    cwd: str,
+    *,
+    marker: str,
+    reason: str,
+    delta: int,
+    session_id: str,
+    workstream_id: str = "",
+) -> None:
+    """Bump a verdict-pattern's value_score by delta.
+
+    Called by journal._apply_outcomes_feedback when a workstream
+    closes with flag_history entries. Aggregates across sessions to
+    build the watchdog's self-calibration memory.
+    """
+    if delta == 0:
+        return
+    try:
+        state = load_state(cwd)
+        fp = derive_pattern_fingerprint(marker, reason)
+        existing = state.verdict_patterns.get(fp)
+        if existing is None:
+            state.verdict_patterns[fp] = VerdictPattern(
+                fingerprint=fp,
+                marker=(marker or "other").lower().split(":", 1)[0].strip() or "other",
+                sample_reason=str(reason or "")[:280],
+                total_flags=1,
+                value_score=max(-10, min(10, delta)),
+                last_seen_session=session_id,
+                last_seen_ts=time.time(),
+                sample_workstream_ids=[workstream_id] if workstream_id else [],
+            )
+        else:
+            existing.total_flags += 1
+            existing.value_score = max(-10, min(10, existing.value_score + delta))
+            existing.last_seen_session = session_id
+            existing.last_seen_ts = time.time()
+            if workstream_id and workstream_id not in existing.sample_workstream_ids:
+                existing.sample_workstream_ids.append(workstream_id)
+                existing.sample_workstream_ids = existing.sample_workstream_ids[-5:]
+        save_state(state)
+    except Exception:
+        pass
 
 
 def rebuild_from_raw(cwd: str, *, prompt_sha: str = "") -> ProjectState:

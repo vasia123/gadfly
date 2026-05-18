@@ -281,6 +281,30 @@ is what separates a useful memory from an attack surface (see the
     agent edited multiple files in the group, or the user described
     them as a unit).
 
+(5) `fulfilled_promise_ids` — IDs of currently-open project promises
+    (from past sessions) that THIS session genuinely COMPLETED. You
+    will receive a list of candidates in an `<open_promises>` section
+    of the user message. Each entry has an `id`, a `title`, and an
+    `evidence` quote from the session where the promise was made.
+    Return the verbatim `id` of any promise whose work was actually
+    landed in this transcript.
+
+    Strict rules — read these carefully:
+      - Include an id ONLY when the transcript shows the work was
+        ACTUALLY DONE in this session. Discussion / planning /
+        starting is NOT fulfillment.
+      - Language-agnostic: a session can be in any language. "всё
+        готово, тесты зелёные", "fait, tests passent", "終わった、
+        テスト通った" all count as completion. Read the semantic
+        meaning, not the words.
+      - Do NOT include an id for work that was merely related but
+        not closing the specific promise.
+      - Be conservative. If unsure → omit. The corpus prefers a
+        promise that quietly ages out over a wrong fulfillment.
+      - Return ids verbatim from the candidate list. Do not invent
+        new ids and do not modify the format.
+      - If no candidate promise was fulfilled, return an empty list.
+
 Output protocol — non-negotiable:
   - Your entire response is ONE and only one call to the
     `extract_findings` tool with the four lists.
@@ -304,6 +328,7 @@ EXTRACT_FINDINGS_INPUT_SCHEMA: dict[str, Any] = {
     "fulfilled_promises": list,
     "new_corrections": list,
     "knowledge_updates": list,
+    "fulfilled_promise_ids": list,
 }
 
 
@@ -350,7 +375,14 @@ def _build_options(captured: _Captured, model: str) -> ClaudeAgentOptions:
         # for the full rationale.
         settings="{}",
         thinking=ThinkingConfigDisabled(type="disabled"),
-        max_turns=2,
+        # max_turns=3 (not 2 like watchdog/journal) — on very large
+        # transcripts Haiku occasionally emits a text turn before
+        # calling extract_findings. Giving it a third turn lets the
+        # tool call land on retry within the same call rather than
+        # nuking the whole digest. Observed in real corpus:
+        # session 870ee492 (137MB) hit max_turns=2 once and was
+        # heading toward exhaustion before this fix.
+        max_turns=3,
         env={"GADFLY_INTERNAL": "1"},
     )
 
@@ -366,6 +398,70 @@ async def _default_run_query(prompt: str, options: ClaudeAgentOptions) -> None:
 # --- User-message builder ----------------------------------------------------
 
 
+MAX_OPEN_PROMISE_CANDIDATES = 20
+
+
+def _candidate_open_promises(
+    cwd: str,
+    events: list[CompactEvent],
+    *,
+    max_n: int = MAX_OPEN_PROMISE_CANDIDATES,
+) -> list[ps.Promise]:
+    """Pick the open promises most likely to be touched by this session.
+
+    Filtered by token overlap between session text and promise title.
+    Without a filter we'd push the entire open-promise list (gadfly: 250+)
+    into every prompt — too noisy and bloats prompt size. Top-N is enough
+    for Haiku to detect fulfillment when relevant; if the matching open
+    promise truly never overlapped the session lexically, fulfillment was
+    extremely unlikely anyway.
+    """
+    state = ps.load_state(cwd)
+    open_ps = [p for p in state.promises.values() if p.status == "open"]
+    if not open_ps:
+        return []
+    # Sample the session text — cap to keep tokenisation cheap.
+    session_text = " ".join(e.text for e in events[:400])
+    sess_tokens = _tokens(session_text)
+    if not sess_tokens:
+        return []
+    common = _common_tokens_in_corpus(state)
+    scored: list[tuple[float, ps.Promise]] = []
+    for p in open_ps:
+        score = _kw_overlap(sess_tokens, _tokens(p.title), common_tokens=common)
+        if score <= 0:
+            continue
+        scored.append((score, p))
+    scored.sort(key=lambda x: (-x[0], x[1].id))
+    return [p for _, p in scored[:max_n]]
+
+
+def render_open_promises_block(candidates: list[ps.Promise]) -> str:
+    if not candidates:
+        return ""
+    lines: list[str] = []
+    lines.append("## <open_promises>")
+    lines.append(
+        "Currently-open promises from PRIOR sessions in this project. If "
+        "any of these were ACTUALLY COMPLETED during the work shown above "
+        "(in ANY language — Russian, English, Japanese, etc.), include "
+        "their verbatim `id` in the `fulfilled_promise_ids` output. "
+        "Conservative bias: when uncertain, omit. Return ids verbatim, do "
+        "not invent."
+    )
+    for p in candidates:
+        ev = (p.provenance.evidence_quote or "").replace("\n", " ").strip()
+        if len(ev) > 200:
+            ev = ev[:200] + "…"
+        lines.append(
+            f"- id: {p.id}\n"
+            f"  title: {p.title}\n"
+            f"  evidence: \"{ev}\""
+        )
+    lines.append("## </open_promises>")
+    return "\n".join(lines)
+
+
 def build_extract_user_message(
     *,
     session_id: str,
@@ -373,6 +469,7 @@ def build_extract_user_message(
     chunk_index: int,
     chunk_count: int,
     previously_extracted: dict[str, Any] | None = None,
+    open_promises_block: str = "",
 ) -> str:
     """Compose the per-chunk user message for the extractor.
 
@@ -380,6 +477,12 @@ def build_extract_user_message(
     extracted findings (not prior semantic state — that would break
     ground-truth preservation). This lets the extractor recognise when
     the agent fulfils in chunk 5 a promise it made in chunk 1.
+
+    `open_promises_block` is the rendered <open_promises> section — the
+    list of open project-level promises Haiku will check for
+    fulfillment. Computed once for the whole session and threaded
+    through every chunk so a chunk-5 completion of a chunk-1 promise
+    still surfaces (same as previously_extracted).
     """
     parts: list[str] = []
     parts.append(f"## Session {session_id}  (chunk {chunk_index + 1}/{chunk_count})")
@@ -390,12 +493,16 @@ def build_extract_user_message(
         )
     parts.append("## Compacted events")
     parts.append(render_chunk(chunk_events))
+    if open_promises_block:
+        parts.append(open_promises_block)
     parts.append(
         "## Task\n"
-        "Extract durable findings (rules 1–4 in the system prompt). Call "
+        "Extract durable findings (rules 1–5 in the system prompt). Call "
         "`extract_findings` exactly once. Empty lists are fine. Every "
         "item MUST include `evidence_quote` (≤200c verbatim from the "
-        "events above)."
+        "events above). For rule (5), only return ids verbatim from the "
+        "<open_promises> list, and only when the work was clearly "
+        "completed in this transcript."
     )
     return "\n\n".join(parts)
 
@@ -412,6 +519,14 @@ def _merge_findings(into: dict[str, Any], chunk: dict[str, Any]) -> None:
         for item in items:
             if isinstance(item, dict):
                 existing.append(item)
+    fp_ids = chunk.get("fulfilled_promise_ids") or []
+    if isinstance(fp_ids, list):
+        existing_ids = into.setdefault("fulfilled_promise_ids", [])
+        seen = set(existing_ids)
+        for pid in fp_ids:
+            if isinstance(pid, str) and pid and pid not in seen:
+                existing_ids.append(pid)
+                seen.add(pid)
 
 
 def _empty_findings() -> dict[str, Any]:
@@ -420,6 +535,7 @@ def _empty_findings() -> dict[str, Any]:
         "fulfilled_promises": [],
         "new_corrections": [],
         "knowledge_updates": [],
+        "fulfilled_promise_ids": [],
     }
 
 
@@ -501,8 +617,18 @@ def distill_session(
     for i in range(0, len(events), MAX_EVENTS_PER_CHUNK):
         chunks.append(events[i : i + MAX_EVENTS_PER_CHUNK])
 
+    # Cross-session fulfillment candidates — computed once over the full
+    # event stream so a chunk-5 completion of a chunk-1 setup still has
+    # the candidate list available. Pure-Python, no Haiku.
+    try:
+        candidates = _candidate_open_promises(cwd, events)
+        open_promises_block = render_open_promises_block(candidates)
+    except Exception:
+        open_promises_block = ""
+
     accumulated = _empty_findings()
     error: str | None = None
+    chunks_completed = 0
     for idx, chunk in enumerate(chunks):
         prompt = build_extract_user_message(
             session_id=session_id,
@@ -510,6 +636,7 @@ def distill_session(
             chunk_index=idx,
             chunk_count=len(chunks),
             previously_extracted=accumulated if idx > 0 else None,
+            open_promises_block=open_promises_block,
         )
         try:
             payload, err = asyncio.run(
@@ -530,6 +657,7 @@ def distill_session(
             error = "Haiku returned no payload"
             break
         _merge_findings(accumulated, payload)
+        chunks_completed += 1
 
     # Attach action_index to items that didn't specify one (best-effort:
     # use the chunk's last action_index so retrieval can still order
@@ -540,29 +668,38 @@ def distill_session(
             if isinstance(item, dict) and "action_index" not in item:
                 item["action_index"] = last_action_index
 
+    is_partial = error is not None and chunks_completed > 0
     digest = {
         "session_id": session_id,
         "ts": time.time(),
         "mtime": transcript_mtime,
         "sha": transcript_sha,
         "chunks": len(chunks),
+        "chunks_completed": chunks_completed,
+        "partial": is_partial,
         "prompt_sha": _system_prompt_sha(),
         **accumulated,
     }
     latency_ms = (time.perf_counter() - t0) * 1000
 
     # Persistence policy:
-    #   - On Haiku error: do NOT write raw digest (would mark the
-    #     session "digested" and lose its data forever). Instead
-    #     bump the failed-attempt counter. The daemon retries until
-    #     ps.MAX_DISTILL_ATTEMPTS, then gives up — manual reset by
-    #     deleting <project>/failed/<sid>.json.
-    #   - On success: write raw digest AND clear any prior failure
-    #     marker (transient errors don't leak forever).
+    #   - Full success (no error): write digest, clear failure marker.
+    #   - PARTIAL success (some chunks OK, later one failed): we still
+    #     write what we got — losing 60 chunks because chunk 61 hit
+    #     max_turns is worse than keeping the 60. Marker is also written
+    #     so the daemon notes the attempt; if a later sweep with newer
+    #     prompts succeeds fully, marker clears.
+    #   - Total failure (no chunks completed): no digest written, just
+    #     failure marker; retried until MAX_DISTILL_ATTEMPTS.
     attempts = 0
     if error is None:
         ps.write_raw_digest(cwd, session_id, digest)
         ps.clear_distill_failure(cwd, session_id)
+    elif is_partial:
+        ps.write_raw_digest(cwd, session_id, digest)
+        attempts = ps.record_distill_failure(
+            cwd, session_id, f"partial: {chunks_completed}/{len(chunks)} chunks then {error}",
+        )
     else:
         attempts = ps.record_distill_failure(cwd, session_id, error)
 
@@ -748,10 +885,60 @@ def _tokens(text: str) -> set[str]:
     return out
 
 
-def _kw_overlap(a: set[str], b: set[str]) -> float:
+def _kw_overlap(a: set[str], b: set[str], common_tokens: set[str] | None = None) -> float:
+    """Token-overlap similarity with project-corpus-aware filtering.
+
+    `common_tokens` is the set of tokens that appear in MANY items
+    across the project corpus (e.g. 'watchdog' in a project ALL ABOUT
+    the watchdog). When the only shared token is in this common set,
+    the match is too generic to surface — score 0. This catches the
+    real-world false-positive: stale promises about "watchdog X"
+    matching every new edit in a watchdog project.
+
+    Distinctive single-token matches still surface (e.g. 'marlin' in
+    a project not centered on Marlin), so concise titles aren't lost.
+    """
     if not a or not b:
         return 0.0
-    return len(a & b) / max(1, min(len(a), len(b)))
+    shared = a & b
+    if not shared:
+        return 0.0
+    if common_tokens and len(shared) == 1 and shared.issubset(common_tokens):
+        # Only a generic project-wide token matched — not enough signal.
+        return 0.0
+    return len(shared) / max(1, min(len(a), len(b)))
+
+
+def _common_tokens_in_corpus(state: "ps.ProjectState", threshold_frac: float = 0.15) -> set[str]:
+    """Tokens appearing in ≥threshold_frac of project items (default 15%).
+
+    Computed inline at retrieval time. Cheap — we already iterate
+    these items. Result is a set of "project-wide" tokens that
+    shouldn't single-handedly justify a match. E.g. for the gadfly
+    project this catches 'watchdog', 'haiku', 'gadfly'.
+
+    Threshold 15% (with 3-item floor) caught the real-world false-positive:
+    'watchdog' appeared in ~12% of gadfly promise titles, enough to be
+    "in the air" but not enough to be rejected by 30%. 15% is a tighter
+    fit; revisit if it gates legitimate distinctive tokens.
+    """
+    titles: list[set[str]] = []
+    for p in state.promises.values():
+        if p.status == "open":
+            titles.append(_tokens(p.title))
+    for c in state.corrections.values():
+        titles.append(_tokens(c.rule + " " + c.why))
+    for s in state.subsystems.values():
+        titles.append(_tokens(s.title + " " + s.purpose))
+    if not titles:
+        return set()
+    from collections import Counter
+    cnt: Counter[str] = Counter()
+    for t in titles:
+        for tok in t:
+            cnt[tok] += 1
+    threshold = max(3, int(len(titles) * threshold_frac))
+    return {tok for tok, n in cnt.items() if n >= threshold}
 
 
 def find_relevant_priors(
@@ -782,12 +969,31 @@ def find_relevant_priors(
     q_tokens = _tokens(workstream_title)
     file_set = {fp for fp in file_paths if fp}
     hits: list[PriorHit] = []
+    _now = time.time()
+    # IDF-style filter: tokens that appear in ≥30% of project items are
+    # too generic to single-handedly justify a match. Computed once per
+    # retrieval call.
+    common = _common_tokens_in_corpus(state)
+
+    def _recency_penalty(ts: float) -> float:
+        """Penalty term for stale entries. -0.05 / week of age, capped
+        at -0.5. Without this the retrieval keeps surfacing months-old
+        priors that share a generic keyword with the current workstream
+        (e.g. 'watchdog' in a project all about the watchdog).
+        Recent evidence is much more relevant than old."""
+        if ts <= 0 or _now <= ts:
+            return 0.0
+        age_weeks = (_now - ts) / (7 * 24 * 3600)
+        return max(-0.5, -0.05 * age_weeks)
 
     # --- promises ---
     for pid, p in state.promises.items():
         if p.status != "open":
             continue
-        score = _kw_overlap(q_tokens, _tokens(p.title))
+        score = _kw_overlap(q_tokens, _tokens(p.title), common_tokens=common)
+        if score <= 0:
+            continue
+        score += _recency_penalty(p.last_seen_ts or p.provenance.first_seen_ts)
         if score <= 0:
             continue
         hits.append(PriorHit(
@@ -802,9 +1008,10 @@ def find_relevant_priors(
 
     # --- corrections ---
     for cid, c in state.corrections.items():
-        score = _kw_overlap(q_tokens, _tokens(c.rule + " " + c.why))
+        score = _kw_overlap(q_tokens, _tokens(c.rule + " " + c.why), common_tokens=common)
         # usefulness signal nudges things up/down at the margins
         score += 0.05 * c.usefulness_score
+        score += _recency_penalty(c.provenance.first_seen_ts)
         if score <= 0:
             continue
         hits.append(PriorHit(
@@ -819,12 +1026,16 @@ def find_relevant_priors(
 
     # --- subsystems (use file-path overlap as primary signal) ---
     for sid_canonical, s in state.subsystems.items():
-        kw_score = _kw_overlap(q_tokens, _tokens(s.title + " " + s.purpose))
+        kw_score = _kw_overlap(q_tokens, _tokens(s.title + " " + s.purpose), common_tokens=common)
         sub_files = set(s.files or [])
         file_score = 0.0
         if file_set and sub_files:
             file_score = len(file_set & sub_files) / max(1, len(file_set))
         score = max(kw_score, file_score) + 0.05 * s.usefulness_score
+        # Subsystems are about CURRENT codebase shape — use last_touched
+        # rather than first_seen for recency. A subsystem touched
+        # yesterday is fresh even if first observed weeks ago.
+        score += _recency_penalty(s.last_touched_ts or s.provenance.first_seen_ts)
         if score <= 0:
             continue
         hits.append(PriorHit(

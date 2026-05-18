@@ -47,6 +47,10 @@ class SessionContext:
     # when journal-mode is disabled (GADFLY_JOURNAL=0). When set, the
     # watchdog prompt switches to journal-aware composition.
     journal: Any = None
+    # Canonical cwd. Set by hook.main() from the PostToolUse payload.
+    # Watchdog uses it to look up project_state.verdict_patterns for
+    # the E2 self-calibration block.
+    cwd: str = ""
 
     @property
     def last_user_request(self) -> str | None:

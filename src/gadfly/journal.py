@@ -341,10 +341,30 @@ Rules for updates:
      workstream for a while, when a new workstream emerged unplanned,
      or when the user redirected significantly.
 
-(R6) Flag history is APPEND-ONLY. You receive new flag_history
-     entries via the input field `new_flag_events` (a list of
-     FlagEvents to append to the relevant workstream). You do not
-     invent flags yourself — those come from the verdict call.
+(R6) Flag history is APPEND-ONLY (you NEVER invent flags). You
+     receive new flag_history entries via the input field
+     `new_flag_events` to append to the relevant workstream. The
+     verdict pipeline owns flag creation.
+
+     EXCEPTION — pushback detection on EXISTING flags. When the
+     agent's reasoning in `new pairs` or in `Agent's reasoning
+     immediately before the new action` explicitly disagrees with
+     a prior flag (cites it, argues it's wrong, provides counter-
+     evidence, dismissive about "watchdog"), find that flag in
+     flag_history and set `agent_pushed_back: true` plus a one-line
+     `pushback` summary (≤200c). This is the only flag mutation
+     you're authorised to make. It powers the watchdog's repetition
+     rule — without it, the watchdog keeps echoing the same flag.
+
+     Signals of pushback:
+       - "watchdog не прав / wrong / false positive / stale context"
+       - agent explicitly disputes the flag's premise
+       - agent provides concrete evidence the flag is mistaken
+         (line numbers, grep output, prior edits not seen by watchdog)
+       - agent acknowledges the concern but explains why proceeding
+         anyway is the right call ("this IS the root-cause fix",
+         "the composable is the next edit", "intentional workaround")
+     Routine compliance ("ok, I'll fix it") is NOT pushback.
 
 (R7) Reject implausibly large changes. If the input would have you
      delete more than half of existing workstreams, OR rewrite the
@@ -701,7 +721,7 @@ async def _update_async(
 _CLOSED_STATUSES = {"done", "abandoned"}
 
 
-def _apply_outcomes_feedback(*, cwd: str, base: Journal, candidate: Journal) -> None:
+def _apply_outcomes_feedback(*, cwd: str, base: Journal, candidate: Journal, session_id: str = "") -> None:
     """When a workstream just closed and had priors_consulted, score the
     referenced project_state entries against the workstream's final
     notes. Mentioned priors get +1 usefulness_score; ignored ones get -1.
@@ -726,6 +746,27 @@ def _apply_outcomes_feedback(*, cwd: str, base: Journal, candidate: Journal) -> 
         if was in _CLOSED_STATUSES:
             # Already closed before this update — don't re-score.
             continue
+
+        # E2: score verdict_patterns. Independent of priors consultation —
+        # any flag in a closing workstream's flag_history contributes.
+        # `done` + agent_pushed_back=true → flag was probably wrong (-1).
+        # `done` + no pushback → flag was probably right, agent complied (+1).
+        # `abandoned` → ambiguous, no score change.
+        if w.flag_history and w.status == "done":
+            for fe in w.flag_history:
+                delta = -1 if fe.agent_pushed_back else 1
+                try:
+                    ps.update_verdict_pattern(
+                        cwd,
+                        marker=fe.marker or "other",
+                        reason=fe.reason or "",
+                        delta=delta,
+                        session_id=session_id,
+                        workstream_id=w.id,
+                    )
+                except Exception:
+                    pass
+
         if not w.priors_consulted:
             w.priors_scored = True
             continue
@@ -986,7 +1027,7 @@ def update_for_action(
     # bump their project_state.usefulness_score accordingly.
     if cwd and os.environ.get("GADFLY_HISTORIAN_PRIORS", "1") != "0":
         try:
-            _apply_outcomes_feedback(cwd=cwd, base=base, candidate=candidate)
+            _apply_outcomes_feedback(cwd=cwd, base=base, candidate=candidate, session_id=session_id)
         except Exception:
             # Outcomes feedback is a quality nudge, not a requirement.
             pass

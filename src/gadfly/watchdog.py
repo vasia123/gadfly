@@ -155,6 +155,18 @@ async def evaluate_async(
     )
     system_prompt = _select_system_prompt(use_journal)
     options = _build_options(captured, model, system_prompt=system_prompt)
+    # E2: pull verdict_patterns from project_state for this cwd, so the
+    # journal-mode prompt can render them. Cheap (one JSON read).
+    verdict_patterns: dict[str, Any] | None = None
+    if use_journal and context.cwd:
+        try:
+            from . import project_state as _ps
+
+            state = _ps.load_state(context.cwd)
+            if state.verdict_patterns:
+                verdict_patterns = state.verdict_patterns
+        except Exception:
+            verdict_patterns = None
     user_message = build_user_message(
         tool_name=tool_name,
         tool_input=tool_input,
@@ -164,6 +176,7 @@ async def evaluate_async(
         recent_actions=context.recent_actions,
         distilled_goal=context.distilled_goal,
         journal=context.journal if use_journal else None,
+        verdict_patterns=verdict_patterns,
     )
     system_prompt_sha = audit_log.ensure_system_prompt(system_prompt)
 

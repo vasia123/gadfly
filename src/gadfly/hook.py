@@ -51,6 +51,86 @@ def _heartbeat_dir() -> "Path":
     return Path.home() / ".claude" / "gadfly" / "heartbeat"
 
 
+def _pending_flags_dir() -> "Path":
+    from pathlib import Path  # noqa: WPS433
+    base = os.environ.get("GADFLY_LOG_DIR")
+    if base:
+        return Path(base).parent / "pending_flags"
+    return Path.home() / ".claude" / "gadfly" / "pending_flags"
+
+
+def _enqueue_pending_flag(
+    session_id: str,
+    *,
+    action_index: int,
+    reason: str,
+    suggestion: str,
+) -> None:
+    """Record a flag for the journal maintainer to ingest on the NEXT hook.
+
+    The verdict happens AFTER journal.update_for_action in this hook, so the
+    flag this verdict produces can't be fed into the current journal update.
+    Instead we drop it into a pending queue; the next hook call reads and
+    drains the queue, passing FlagEvents into update_for_action so they
+    land in workstream.flag_history. This is what powers the journal's
+    repetition rule (Phase 2 verdict prompt).
+
+    Robust to ordering: dict-based append with atomic rename.
+    """
+    try:
+        d = _pending_flags_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{session_id}.json"
+        items = []
+        if path.is_file():
+            try:
+                items = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(items, list):
+                    items = []
+            except Exception:
+                items = []
+        # Marker classification mirrors prompts.SYSTEM_PROMPT conventions.
+        marker = "other"
+        if isinstance(reason, str):
+            r_low = reason.lower()
+            if r_low.startswith("symptom fix"):
+                marker = "symptom"
+            elif r_low.startswith("rationalization"):
+                marker = "rationalization"
+        items.append({
+            "action_index": int(action_index or 0),
+            "reason": (reason or "")[:500],
+            "marker": marker,
+            "suggestion": (suggestion or "")[:500],
+            "ts": time.time(),
+        })
+        # Cap to last 16 — protects against runaway accumulation if the
+        # next hook never fires (e.g. agent exits).
+        items = items[-16:]
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _drain_pending_flags(session_id: str) -> list[dict[str, Any]]:
+    """Return the queued FlagEvent dicts and delete the queue file.
+
+    Atomic-ish: we read+unlink in one block; any concurrent write loses
+    its previous tail (acceptable: this is single-daemon territory).
+    """
+    try:
+        path = _pending_flags_dir() / f"{session_id}.json"
+        if not path.is_file():
+            return []
+        items = json.loads(path.read_text(encoding="utf-8"))
+        path.unlink()
+        return items if isinstance(items, list) else []
+    except Exception:
+        return []
+
+
 def _bump_heartbeat(cwd: str, session_id: str, action_index: int) -> None:
     """Drop a per-cwd heartbeat tick for the historian daemon to pick up.
 
@@ -200,6 +280,7 @@ def main() -> int:
             transcript_path if isinstance(transcript_path, str) else None,
             session_id=session_id,
         )
+        ctx.cwd = cwd  # so watchdog can look up verdict_patterns (E2)
 
         # Phase-1 shadow: maintain a session journal alongside the
         # existing watchdog. The verdict prompt does NOT yet consume the
@@ -218,12 +299,30 @@ def main() -> int:
                 fp = tool_input.get("file_path")
                 if isinstance(fp, str) and fp:
                     hint_files.append(fp)
+                # Drain any flags written by the previous hook iteration
+                # — these are the events that populate workstream
+                # flag_history so the Phase 2 repetition rule can actually
+                # see prior verdicts.
+                pending = _drain_pending_flags(session_id)
+                new_flag_events = None
+                if pending:
+                    new_flag_events = [
+                        journal.FlagEvent(
+                            action_index=int(p.get("action_index") or 0),
+                            reason=str(p.get("reason") or ""),
+                            marker=p.get("marker") or "other",
+                            agent_pushed_back=False,
+                            pushback=None,
+                        )
+                        for p in pending
+                    ]
                 result_j = journal.update_for_action(
                     session_id=session_id,
                     action_index=ctx.action_index,
                     action_summary=action_summary,
                     assistant_reasoning=ctx.last_assistant_plan,
                     pairs=ctx.pairs,
+                    new_flag_events=new_flag_events,
                     cwd=cwd or None,
                     workstream_hint_files=hint_files,
                 )
@@ -299,6 +398,20 @@ def main() -> int:
         # emitted — keeps the stdout latency identical to before.
         if cwd:
             _bump_heartbeat(cwd, session_id, ctx.action_index)
+
+        # If verdict flagged, queue it for the NEXT hook's journal update
+        # to consume — that's how flag_history populates and Phase 2
+        # repetition rule gets data to act on.
+        if (
+            result.verdict.professional is False
+            and os.environ.get("GADFLY_JOURNAL", "1") == "1"
+        ):
+            _enqueue_pending_flag(
+                session_id,
+                action_index=ctx.action_index,
+                reason=result.verdict.reason or "",
+                suggestion=result.verdict.suggestion or "",
+            )
         return 0
     except Exception as exc:
         # Last-resort safety net. Try to log, but never propagate.

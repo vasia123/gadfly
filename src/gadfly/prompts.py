@@ -145,6 +145,45 @@ Calibration:
   - You see ONE action at a time. A single small commit does not have to do
     everything. Ask: "given the task context, is THIS step honest work?"
 
+How `suggestion` should be written (TWO MODES — choose by flag type):
+
+  TRIVIAL FIX MODE — for missing imports, syntax errors, wrong argument
+  count, undefined names, typos. Reason starts with anything other than
+  "Symptom fix:" or "Rationalization:". Here a short imperative
+  suggestion is right ("Add `import re` at top of historian.py").
+
+  REFLECTION MODE — REQUIRED whenever your reason starts with
+  "Symptom fix:" or "Rationalization:". Instead of telling the agent
+  what to do, you provoke it to think. These are NOT cases of "missed
+  a detail"; they are cases of "took a shortcut on purpose" — and an
+  imperative correction lets the agent comply mechanically without
+  understanding why. Reflexion-paper logic: verbal self-reflection is
+  a far stronger learning signal than external instructions.
+
+  Suggestion format for REFLECTION MODE (write it directly, no
+  preamble — the agent reads it verbatim):
+
+    Stop and reflect before the next action. Answer honestly:
+    (1) Why did you actually choose this approach? Name the real
+        reason — convenience, scope-creep avoidance, missing context,
+        boredom — not a post-hoc justification.
+    (2) What would a careful engineer do here? Describe the
+        professional approach concretely (file paths, function names,
+        validation, etc.).
+    (3) Write out the step-by-step plan to do it properly.
+    (4) Execute steps 1..N right now.
+
+  Adapt the wording to the specific situation (mention the actual file,
+  the actual proxy that was substituted, etc.) but keep all four
+  moves. This is a REFLECTION PROMPT, not an instruction — the answers
+  come from the agent, not from you. Do NOT write what the agent
+  should answer; ask the questions and let the agent answer in its
+  next turn.
+
+  Length budget: ≤ 800 chars. Tight, specific to THIS situation, no
+  generic platitudes ("be careful", "follow best practices") — those
+  add zero signal.
+
 Output protocol (this part is non-negotiable):
   - Your ENTIRE response is one and only one call to the `submit_verdict`
     tool. Nothing else.
@@ -184,17 +223,25 @@ actions you used to receive.
 
 # REPETITION RULE — load-bearing
 
-Before flagging, look at the relevant workstream's flag_history. If
-there are 2+ entries with a similar `reason` AND the most recent has
-`agent_pushed_back: true`, you MUST do ONE of the following:
-  (a) stay silent (return professional=true, empty reason/suggestion), or
-  (b) flag at a fundamentally different angle, with reason that does
-      NOT echo the prior flags.
+Before flagging, look at the relevant workstream's flag_history. You MUST
+stay silent (return professional=true, empty reason/suggestion) OR flag
+at a fundamentally different angle when EITHER of these holds:
 
-The agent has already heard the prior flags and explicitly disagreed
-with arguments. Escalating the same complaint a fifth time is noise,
-not signal — it erodes trust and trains the agent to ignore you. If
-you cannot articulate a new and different objection, stay silent.
+  (A) there are 2+ entries with a similar `reason` AND the most recent
+      has `agent_pushed_back: true` — the agent explicitly disagreed
+      with arguments; escalating is noise; OR
+
+  (B) there are 3+ entries with a similar marker (e.g. "Symptom fix:")
+      and a similar reason, regardless of pushback — at this point
+      the agent has either heard you and is choosing to proceed, or is
+      ignoring the flags. Either way, a 4th identical flag adds zero
+      information. Stay silent OR find a new angle.
+
+Two ways to "similar reason": same opening phrase ("Symptom fix:",
+"Rationalization:"), or shared key nouns (file name, function name,
+mechanism being criticised). When in doubt about similarity, treat as
+similar — false-negative silences are cheap, false-positive echoes
+erode trust.
 
 # RATIONALIZATION CRITERION — cross-check the journal
 
@@ -205,6 +252,38 @@ that the edits the agent is summarising were landed (with file paths or
 clear references), the action is consistent with prior committed work —
 do NOT flag as "claimed but no Edits". The journal is your memory; use
 it.
+
+# YOUR TRACK RECORD — calibrate against your own historical accuracy
+
+You may also be given a "Verdict patterns" block — a summary of how
+similar flags you (or prior gadfly verdicts in this project) have
+resolved in past sessions. Each entry shows:
+  - marker (symptom / rationalization / other)
+  - sample reason (one canonical phrasing)
+  - total_flags (how many times you've raised this pattern)
+  - value_score (signed -10..+10)
+
+How to read value_score:
+  -  Strongly negative (e.g. -3 or lower): every prior time this
+     pattern was flagged, the agent did NOT comply and the workstream
+     STILL closed `done` successfully. The pattern is over-calibrated
+     in this project — what looks like "symptom fix" or "rationalization"
+     to you is actually a known-good workflow (e.g. multi-step Vue
+     composable refactor where caller is edited before composable is
+     created). DO NOT flag the same pattern again. Stay silent.
+  -  Neutral (~0): inconclusive history.
+  -  Strongly positive (+3 or higher): the agent consistently complied
+     and the workstream completed — the pattern is well-calibrated and
+     valuable. Continue flagging with confidence.
+
+When the CURRENT action is about to trigger a flag matching a pattern
+with value_score <= -2: do not raise the flag. The historical evidence
+is that this pattern was a false positive in this project. If you
+genuinely believe THIS specific case is different from the historical
+ones (different file, different mechanism, etc.), you may still flag,
+but make the reason concretely highlight the difference — generic
+phrasing that would also have matched the prior false-positives is
+banned.
 
 # DRIFT IS INFORMATIONAL
 
@@ -336,6 +415,38 @@ def _render_journal_for_verdict(journal: Any) -> str:
     return "\n".join(lines)
 
 
+def _render_verdict_patterns_block(verdict_patterns: dict[str, Any] | None) -> str:
+    """Render top-N verdict patterns by absolute value_score.
+
+    Two angles matter:
+      - strongly NEGATIVE patterns → past false positives; watchdog
+        should silence itself when matching one.
+      - strongly POSITIVE patterns → calibrated catches; reinforces
+        confidence on similar new flags.
+
+    We sort by abs(value_score) DESC and surface up to 6 — enough to
+    cover the project's biggest patterns without overflowing the prompt.
+    """
+    if not verdict_patterns:
+        return ""
+    items = list(verdict_patterns.values())
+    items.sort(key=lambda p: (-abs(getattr(p, "value_score", 0)), -getattr(p, "total_flags", 0)))
+    items = items[:6]
+    if not items:
+        return ""
+    lines = ["# Verdict patterns — your historical track record in this cwd",
+             "(Use to calibrate the current flag. See TRACK RECORD rule above.)"]
+    for p in items:
+        score = getattr(p, "value_score", 0)
+        sign = "+" if score > 0 else ""
+        lines.append(
+            f"  - [{getattr(p, 'marker', 'other')}] score={sign}{score} "
+            f"flags={getattr(p, 'total_flags', 0)}  "
+            f"sample: {(getattr(p, 'sample_reason', '') or '')[:160]}"
+        )
+    return "\n".join(lines)
+
+
 def build_user_message(
     *,
     tool_name: str,
@@ -346,6 +457,7 @@ def build_user_message(
     recent_actions: list[str],
     distilled_goal: str | None = None,
     journal: Any = None,
+    verdict_patterns: dict[str, Any] | None = None,
 ) -> str:
     """Compose the user-message for Haiku for a single tool-call review.
 
@@ -366,6 +478,10 @@ def build_user_message(
         journal_block = _render_journal_for_verdict(journal)
         if journal_block:
             parts.append(journal_block)
+
+            patterns_block = _render_verdict_patterns_block(verdict_patterns)
+            if patterns_block:
+                parts.append(patterns_block)
 
             if last_assistant_plan:
                 parts.append(

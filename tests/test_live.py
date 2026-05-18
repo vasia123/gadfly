@@ -383,3 +383,90 @@ def test_historian_retrieval_surfaces_seeded_finding(tmp_path, monkeypatch):
         m in haystack
         for m in ("bench", "kernel", "tier", "criterion", "performance")
     ), f"top hit unrelated to the query: {top!r}"
+
+
+_MULTILINGUAL_FULFILL_TRANSCRIPT = [
+    {"message": {"role": "user", "content": (
+        "напиши хелпер для парсинга rate-limit заголовков "
+        "в src/api/ratelimit.py — нужно прочитать X-RateLimit-* "
+        "и вернуть структуру"
+    )}},
+    {"message": {"role": "assistant", "content": [
+        {"type": "text", "text":
+            "реализовал parse_ratelimit_headers в src/api/ratelimit.py: "
+            "читает X-RateLimit-Limit/Remaining/Reset и возвращает "
+            "RateLimitInfo. добавил тесты в tests/test_ratelimit.py — "
+            "всё готово, тесты зелёные."},
+        {"type": "tool_use", "name": "Edit", "input": {
+            "file_path": "src/api/ratelimit.py",
+            "old_string": "", "new_string": "def parse_ratelimit_headers(): ..."
+        }},
+        {"type": "tool_use", "name": "Edit", "input": {
+            "file_path": "tests/test_ratelimit.py",
+            "old_string": "", "new_string": "def test_parse(): ..."
+        }},
+    ]}},
+]
+
+
+@live
+def test_historian_cross_session_fulfillment_russian(tmp_path, monkeypatch):
+    """Language-agnostic fulfillment via real Haiku.
+
+    Seed an open promise about parsing rate-limit headers (an English
+    promise title). Run distill on a transcript written in Russian
+    where the agent says "всё готово, тесты зелёные" while editing the
+    matching files. Haiku must return the promise's id in
+    `fulfilled_promise_ids` — proving the deterministic English-verb
+    matcher is NOT load-bearing: a real model handles cross-language
+    semantics.
+    """
+    monkeypatch.setenv("GADFLY_LOG_DIR", str(tmp_path / "log"))
+    cwd = "/proj/multilingual-fulfill"
+
+    # Seed an open promise via a synthetic raw digest.
+    seed = {
+        "session_id": "seed-session",
+        "ts": 100.0,
+        "new_promises": [{
+            "title": "implement parse_ratelimit_headers helper in src/api/ratelimit.py",
+            "evidence_quote": "TODO: parse X-RateLimit-* headers in a helper",
+            "action_index": 3,
+        }],
+        "fulfilled_promises": [], "new_corrections": [],
+        "knowledge_updates": [],
+    }
+    project_state_mod.write_raw_digest(cwd, "seed-session", seed)
+    state = project_state_mod.rebuild_from_raw(cwd)
+    project_state_mod.save_state(state)
+    assert len(state.promises) == 1
+    pid = next(iter(state.promises.keys()))
+    assert state.promises[pid].status == "open"
+
+    # Write the Russian-language fulfillment transcript.
+    tp = tmp_path / "ru-session.jsonl"
+    import json as _json
+    with tp.open("w") as f:
+        for e in _MULTILINGUAL_FULFILL_TRANSCRIPT:
+            f.write(_json.dumps(e, ensure_ascii=False) + "\n")
+
+    res = historian_mod.distill_session(
+        cwd=cwd,
+        session_id="ru-session",
+        transcript_path=tp,
+        transcript_mtime=tp.stat().st_mtime,
+    )
+    assert res.error is None, f"distill failed: {res.error}"
+    fulfilled_ids = res.raw_digest.get("fulfilled_promise_ids") or []
+    assert pid in fulfilled_ids, (
+        f"Haiku did NOT recognise the Russian-language fulfillment.\n"
+        f"  expected pid: {pid}\n"
+        f"  fulfilled_promise_ids: {fulfilled_ids}\n"
+        f"  This is the load-bearing multilingual case — if it fails, "
+        f"the deterministic English-verb matcher would have been the "
+        f"only fallback, and that fails silently for non-English users."
+    )
+    # Aggregator applies it.
+    rebuilt = project_state_mod.rebuild_from_raw(cwd)
+    assert rebuilt.promises[pid].status == "fulfilled"
+    assert rebuilt.promises[pid].fulfilled_in_session == "ru-session"

@@ -151,6 +151,81 @@ def test_build_user_message_journal_mode_renders_journal_block():
     assert "Recent prior actions" not in msg
 
 
+def test_build_user_message_renders_verdict_patterns_block():
+    """E2: when verdict_patterns are provided in journal-mode, the prompt
+    surfaces them so Haiku can self-calibrate against past flag values."""
+    from gadfly.journal import Journal, Workstream
+    from gadfly.project_state import VerdictPattern
+
+    j = Journal(
+        root_goal="x",
+        workstreams=[Workstream(id="w", title="t", status="open")],
+    )
+    patterns = {
+        "p1": VerdictPattern(
+            fingerprint="symptom-composable",
+            marker="symptom",
+            sample_reason="Symptom fix: composable does not exist yet",
+            total_flags=5,
+            value_score=-4,  # strongly negative → false-positive class
+        ),
+        "p2": VerdictPattern(
+            fingerprint="rationalization-no-evidence",
+            marker="rationalization",
+            sample_reason="Rationalization: claimed without evidence",
+            total_flags=2,
+            value_score=2,
+        ),
+    }
+    msg = prompts.build_user_message(
+        tool_name="Edit",
+        tool_input={"file_path": "x.vue", "old_string": "a", "new_string": "b"},
+        tool_response={"success": True},
+        recent_user_requests=[],
+        last_assistant_plan="refactor",
+        recent_actions=[],
+        journal=j,
+        verdict_patterns=patterns,
+    )
+    assert "Verdict patterns" in msg
+    assert "composable" in msg
+    assert "score=-4" in msg or "-4" in msg
+    assert "score=+2" in msg or "+2" in msg
+
+
+def test_system_prompt_includes_reflection_mode():
+    """Reflection-mode rule: serious flags (Symptom fix / Rationalization)
+    use Reflexion-style provocation rather than imperative correction.
+    The agent gets a chance to verbalise its own reasoning, which is a
+    far stronger learning signal than 'do X instead of Y'."""
+    p = prompts.SYSTEM_PROMPT.lower()
+    assert "reflection mode" in p
+    assert "reflexion" in p  # cite the source
+    # Required structure of the reflection prompt:
+    assert "why did you" in p
+    assert "step-by-step" in p
+    assert "execute" in p
+    # Must explicitly distinguish trivial vs reflection mode
+    assert "trivial fix mode" in p
+
+
+def test_system_prompt_journal_inherits_reflection_mode():
+    """SYSTEM_PROMPT_JOURNAL extends SYSTEM_PROMPT — reflection mode rules
+    must also apply there. Otherwise Phase 2 verdicts regress to
+    imperative-only suggestions."""
+    p = prompts.SYSTEM_PROMPT_JOURNAL.lower()
+    assert "reflection mode" in p
+    assert "why did you" in p
+
+
+def test_journal_system_prompt_includes_track_record_rule():
+    """E2 prompt addition: tells Haiku how to read value_score."""
+    p = prompts.SYSTEM_PROMPT_JOURNAL.lower()
+    assert "value_score" in p
+    assert "track record" in p or "over-calibrated" in p
+    assert "do not flag" in p or "stay silent" in p
+
+
 def test_build_user_message_falls_back_to_legacy_when_journal_empty():
     from gadfly.journal import empty_journal
 

@@ -542,10 +542,13 @@ def test_update_injects_project_priors_when_enabled(isolated_paths, captured_ref
 
     cwd = "/proj/with-priors"
     # Seed a project corpus with one open promise that matches the
-    # incoming user pair.
+    # incoming user pair. Use a recent timestamp — the recency penalty
+    # (added by the bizprofit false-positive fix) would otherwise wipe
+    # the score for a unix-epoch timestamp.
+    import time as _t
     digest = {
         "session_id": "prior_session",
-        "ts": 100.0,
+        "ts": _t.time() - 86400,  # 1 day ago — fresh
         "new_promises": [{
             "title": "implement marlin EXL3 benchmark coverage",
             "evidence_quote": "I'll add the marlin bench later",
@@ -688,6 +691,87 @@ def test_outcomes_feedback_bumps_usefulness_when_workstream_closes_with_priors(
     # Reload project state — usefulness_score should have bumped.
     state2 = ps_mod.load_state(cwd)
     assert state2.corrections[correction_id].usefulness_score == 1
+
+
+def test_outcomes_feedback_scores_verdict_patterns_on_workstream_close(
+    isolated_paths, captured_ref, monkeypatch
+):
+    """E2: when a workstream with flag_history closes `done`, each
+    flag's pattern fingerprint gets a value_score bump.
+    - agent_pushed_back=true → -1 (likely false positive)
+    - no pushback → +1 (catch was valuable, agent complied)"""
+    from gadfly import project_state as ps_mod
+
+    monkeypatch.setenv("GADFLY_HISTORIAN_PRIORS", "1")
+    cwd = "/proj/verdict-patterns"
+
+    # Base journal: in-progress workstream with two flags in history.
+    base = j.Journal(
+        workstreams=[j.Workstream(
+            id="ws1",
+            title="composable refactor",
+            status="in-progress",
+            flag_history=[
+                j.FlagEvent(
+                    action_index=10,
+                    reason="Symptom fix: composable does not exist yet",
+                    marker="symptom",
+                    agent_pushed_back=True,  # agent disagreed, was right
+                ),
+                j.FlagEvent(
+                    action_index=11,
+                    reason="Rationalization: claimed as done but no Edits",
+                    marker="rationalization",
+                    agent_pushed_back=False,  # agent complied
+                ),
+            ],
+        )],
+        prompt_sha=j._system_prompt_sha(),
+    )
+    j.save_current("e2_session", base)
+
+    # Haiku now closes the workstream as done.
+    payload = {
+        "root_goal": "",
+        "workstreams": [{
+            "id": "ws1",
+            "title": "composable refactor",
+            "status": "done",
+            "origin": "",
+            "notes": "Composable created, all callers refactored.",
+            "watchdog_flags": 2,
+            "flag_history": [
+                {"action_index": 10,
+                 "reason": "Symptom fix: composable does not exist yet",
+                 "marker": "symptom",
+                 "agent_pushed_back": True},
+                {"action_index": 11,
+                 "reason": "Rationalization: claimed as done but no Edits",
+                 "marker": "rationalization",
+                 "agent_pushed_back": False},
+            ],
+            "last_touched": 12,
+        }],
+        "drift": {"initial_workstream_ids": [], "observations": ""},
+    }
+    runner = _runner_writing(captured_ref, payload)
+
+    j.update_for_action(
+        session_id="e2_session",
+        action_index=12,
+        action_summary="Bash: cargo test",
+        assistant_reasoning="all green",
+        pairs=[],
+        cwd=cwd,
+        run_query=runner,
+    )
+
+    # Verdict patterns should have been scored: one -1 (pushback), one +1.
+    state = ps_mod.load_state(cwd)
+    assert len(state.verdict_patterns) == 2
+    by_marker = {p.marker: p for p in state.verdict_patterns.values()}
+    assert by_marker["symptom"].value_score == -1
+    assert by_marker["rationalization"].value_score == 1
 
 
 def test_outcomes_feedback_decrements_when_priors_were_ignored(
