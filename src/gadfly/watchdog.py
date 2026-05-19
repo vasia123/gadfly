@@ -89,7 +89,7 @@ def _build_submit_verdict_tool(captured: _Captured):
     return submit_verdict
 
 
-def _build_options(captured: _Captured, model: str, system_prompt: str = SYSTEM_PROMPT) -> ClaudeAgentOptions:
+def _build_options(captured: _Captured, model: str, system_prompt: str = SYSTEM_PROMPT, max_turns: int = DEFAULT_MAX_TURNS) -> ClaudeAgentOptions:
     server = create_sdk_mcp_server(
         "gadfly",
         "1.0.0",
@@ -118,7 +118,7 @@ def _build_options(captured: _Captured, model: str, system_prompt: str = SYSTEM_
         # then explodes with `KeyError('type')`. The `type=` kwarg below
         # is mandatory. Covered by tests/test_live.py::test_evaluate_*.
         thinking=ThinkingConfigDisabled(type="disabled"),
-        max_turns=DEFAULT_MAX_TURNS,
+        max_turns=max_turns,
         env={"GADFLY_INTERNAL": "1"},
     )
 
@@ -144,6 +144,7 @@ async def evaluate_async(
     model: str = DEFAULT_MODEL,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     run_query: RunQuery = _default_run_query,
+    max_turns: int = DEFAULT_MAX_TURNS,
 ) -> EvaluationResult:
     captured = _Captured()
     # Phase 2 is the default — verdict reads the journal when one is
@@ -154,7 +155,7 @@ async def evaluate_async(
         and os.environ.get("GADFLY_JOURNAL_VERDICT", "1") != "0"
     )
     system_prompt = _select_system_prompt(use_journal)
-    options = _build_options(captured, model, system_prompt=system_prompt)
+    options = _build_options(captured, model, system_prompt=system_prompt, max_turns=max_turns)
     # E2: pull verdict_patterns from project_state for this cwd, so the
     # journal-mode prompt can render them. Cheap (one JSON read).
     verdict_patterns: dict[str, Any] | None = None
@@ -222,6 +223,7 @@ def evaluate(
     model: str = DEFAULT_MODEL,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     run_query: RunQuery = _default_run_query,
+    max_turns: int = DEFAULT_MAX_TURNS,
 ) -> EvaluationResult:
     """Sync entry point used by the hook."""
     try:
@@ -234,6 +236,7 @@ def evaluate(
                 model=model,
                 timeout_s=timeout_s,
                 run_query=run_query,
+                max_turns=max_turns,
             )
         )
     except Exception as exc:

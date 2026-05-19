@@ -91,9 +91,52 @@ scripts/
                 bills the real subscription). CASES A/B exercise the
                 legacy prompt; CASES C/D exercise the journal-aware
                 repetition rule (gated by GADFLY_JOURNAL_VERDICT=1).
-tests/          92+ unit tests, all mock the SDK via DI. test_live.py
+  build_corpus.py
+                Mines ~/.claude/gadfly/log/ for flagged verdicts the
+                agent acknowledged in transcript text. For each, slices
+                the source transcript at the flag point, runs current
+                session.load(), and serializes the resulting
+                SessionContext + tool_input/response + original verdict
+                into tests/fixtures/watchdog_corpus/cases.json.
+                Replayable forever, machine-portable (snapshots frozen
+                inline). Re-run whenever new ack-worthy flags accumulate.
+  run_corpus.py Replays the corpus through evaluate() with a chosen
+                model (--model, default Haiku). Prints per-case ✓/✗
+                and aggregate catch rate; writes JSON report via --out.
+                Cost ~5 min for the full corpus via subscription billing.
+  compare_corpus.py
+                Diffs two run_corpus reports. Reports regressions
+                (caught→missed) and improvements (missed→caught).
+                Exit 1 when regressions exceed --allow-regressions
+                (default 0) — useful in CI for prompt-experiment gates.
+tests/          245+ unit tests, all mock the SDK via DI. test_live.py
                 is gated by GADFLY_LIVE=1 and covers Haiku integration
-                for verdict, goal, and journal flows.
+                for verdict, goal, and journal flows. test_watchdog_
+                corpus.py replays the curated useful-flag corpus and
+                asserts the aggregate catch rate stays above
+                GADFLY_CORPUS_THRESHOLD (default 0.70). Baselines:
+                  - claude-haiku-4-5: 18/24 = 75% (baseline_haiku.json)
+                  - claude-sonnet-4-6: 3/24 = 12.5% (baseline_sonnet.json,
+                    max_turns=6) — Sonnet is dramatically more lenient
+                    on the current rubric. It silences 17 cases Haiku
+                    catches but catches 2 that Haiku misses (case_002
+                    design-system, case_004 scope-pivot). Implication:
+                    Haiku is the model the prompt is calibrated for;
+                    swapping models requires prompt re-tuning, not
+                    just config change.
+                The 6 missed cases are mostly STRUCTURAL gaps, not
+                prompt bugs: rationalization detection (case_010) and
+                scope-pivot detection (case_004) require journal-mode
+                / workstream context which the replay deliberately
+                disables; case_000 is borderline because the agent
+                had already self-corrected before the second flag and
+                silence is arguably the right call now. Do not chase
+                these with non-rules — verify against journal-mode
+                first if you ever want to lift the threshold.
+                Note: DEFAULT_MAX_TURNS=2 is Haiku-specific; evaluate()
+                and _build_options thread max_turns through and
+                run_corpus.py exposes --max-turns (default 4) for
+                cross-model runs.
 ```
 
 ## The journal (Phase 1 default, Phase 2 opt-in)
