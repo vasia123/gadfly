@@ -635,3 +635,108 @@ def test_reference_snapshot_keeps_head_tail_when_over_budget(tmp_path: Path):
     snap = out[str(ref)]
     assert "HEAD" in snap and "TAIL" in snap
     assert "truncated" in snap
+
+
+# --- Recent bash actions trajectory ----------------------------------------
+
+
+def _bash_tool_use(tid: str, cmd: str) -> dict:
+    return {"type": "tool_use", "name": "Bash", "id": tid,
+            "input": {"command": cmd}}
+
+
+def _user_tool_result(tid: str, payload) -> dict:
+    return {"message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tid, "content": payload}
+    ]}}
+
+
+def test_recent_bash_actions_pairs_tool_use_with_result(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(p, [
+        _asst(_bash_tool_use("t1", "curl -X POST http://host/api")),
+        _user_tool_result("t1", [{"type": "text",
+                                   "text": '{"stdout":"{\\"error\\":\\"400\\"}", "exit_code":0, "stderr":""}'}]),
+        _asst(_bash_tool_use("t2", "grep xgrammar /tmp/log")),
+        _user_tool_result("t2", [{"type": "text",
+                                   "text": '{"stdout":"", "exit_code":1, "stderr":""}'}]),
+    ])
+    ctx = session.load(str(p), distill=False)
+    assert len(ctx.recent_bash_actions) == 2
+    idx0, cmd0, ec0, out0, err0 = ctx.recent_bash_actions[0]
+    idx1, cmd1, ec1, out1, err1 = ctx.recent_bash_actions[1]
+    assert idx0 == 1 and "curl" in cmd0
+    assert ec0 == 0 and "400" in out0
+    assert idx1 == 2 and "grep" in cmd1
+    assert ec1 == 1 and out1 == ""
+
+
+def test_recent_bash_actions_caps_at_max_n(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    entries = []
+    for i in range(15):
+        tid = f"t{i}"
+        entries.append(_asst(_bash_tool_use(tid, f"echo {i}")))
+        entries.append(_user_tool_result(tid, [{"type": "text",
+                                                 "text": f'{{"stdout":"{i}", "exit_code":0, "stderr":""}}'}]))
+    _write_jsonl(p, entries)
+    ctx = session.load(str(p), distill=False)
+    assert len(ctx.recent_bash_actions) == session.MAX_BASH_ACTIONS
+    # Last N, so first kept is i=15-MAX_BASH_ACTIONS.
+    first_kept = 15 - session.MAX_BASH_ACTIONS
+    assert f"echo {first_kept}" in ctx.recent_bash_actions[0][1]
+    assert "echo 14" in ctx.recent_bash_actions[-1][1]
+
+
+def test_recent_bash_actions_truncates_long_output(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    huge = "X" * 20_000
+    _write_jsonl(p, [
+        _asst(_bash_tool_use("t1", "verbose-cmd")),
+        _user_tool_result("t1", [{"type": "text",
+                                   "text": '{"stdout":"' + huge + '", "exit_code":0, "stderr":""}'}]),
+    ])
+    ctx = session.load(str(p), distill=False)
+    _, _, _, stdout, _ = ctx.recent_bash_actions[0]
+    # Head+tail with marker. Bounded by total budget.
+    assert len(stdout) <= session.MAX_BASH_OUTPUT_TOTAL + 100
+    assert "truncated" in stdout
+
+
+def test_recent_bash_actions_handles_dict_result(tmp_path: Path):
+    """Some transcript versions deliver tool_result.content as a raw
+    dict {stdout, stderr, exit_code} rather than a text-block list."""
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(p, [
+        _asst(_bash_tool_use("t1", "ls")),
+        _user_tool_result("t1", {"stdout": "a\nb", "exit_code": 0,
+                                  "stderr": ""}),
+    ])
+    ctx = session.load(str(p), distill=False)
+    _, _, ec, out, _ = ctx.recent_bash_actions[0]
+    assert ec == 0
+    assert "a\nb" in out
+
+
+def test_recent_bash_actions_empty_when_no_bash(tmp_path: Path):
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(p, [_asst(_edit("a.py"))])
+    ctx = session.load(str(p), distill=False)
+    assert ctx.recent_bash_actions == []
+
+
+def test_recent_bash_actions_orphan_call_has_empty_output(tmp_path: Path):
+    """Some bash calls in a stuck/aborted run have no matching
+    tool_result. They still appear in the trajectory but with empty
+    output and exit_code=None."""
+    p = tmp_path / "t.jsonl"
+    _write_jsonl(p, [
+        _asst(_bash_tool_use("orphan", "cat huge_file")),
+        # No matching tool_result.
+    ])
+    ctx = session.load(str(p), distill=False)
+    assert len(ctx.recent_bash_actions) == 1
+    _, _, ec, out, err = ctx.recent_bash_actions[0]
+    assert ec is None
+    assert out == ""
+    assert err == ""

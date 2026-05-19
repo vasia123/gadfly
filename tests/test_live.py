@@ -871,3 +871,79 @@ def test_evaluate_finds_symbol_added_in_middle_of_large_file():
         f"Same as above with 'does not exist' phrasing.\n"
         f"  reason: {res.verdict.reason}"
     )
+
+
+@live
+def test_evaluate_sees_prior_bash_in_diagnostic_chain():
+    """Round 5 regression (vllm-rust, 00:22:45):
+    agent ran `curl` 2 turns earlier (got 400), now running
+    `grep / tail` on the server log. Without the Bash trajectory
+    block, watchdog used to flag the grep as 'symptom fix — no
+    curl was sent, you don't know if the server even received the
+    request'. With prior Bash actions visible (curl + 400 response),
+    Haiku recognises the grep as the next step in a diagnostic
+    sequence, not an isolated check."""
+    bash_history = [
+        (1820, "cargo build --release --bin vllm-server", 0,
+         "Compiling vllm-core ...\nFinished release [optimized] target(s) in 47.3s",
+         ""),
+        (1822, "RUST_LOG=info ./target/release/vllm-server "
+               "--model turboderp/Qwen3-8B-exl3 --port 8111 "
+               "> /tmp/v18-server.log 2>&1 &", 0,
+         "[1] 42137", ""),
+        (1825,
+         "curl -sS -X POST http://localhost:8111/v1/chat/completions "
+         "-H 'Content-Type: application/json' "
+         "-d '{\"model\":\"qwen3\",\"messages\":[...],\"response_format\":"
+         "{\"type\":\"json_schema\",\"json_schema\":{...}}}'",
+         0,
+         '{"error":{"message":"key must be a string at line 1 column 145",'
+         '"type":"invalid_request_error","code":400}}',
+         ""),
+    ]
+    res = evaluate(
+        tool_name="Bash",
+        tool_input={
+            "command": (
+                "ls -la /tmp/v18-server.log; "
+                "echo '---tail:'; tail -20 /tmp/v18-server.log; "
+                "echo '---grep xgrammar:'; grep -i xgrammar /tmp/v18-server.log | head"
+            ),
+            "description": "inspect server log for xgrammar traces after the curl",
+        },
+        tool_response={
+            "exit_code": 0,
+            "stdout": (
+                "-rw-r--r-- 1 user user 312 May 19 00:22 /tmp/v18-server.log\n"
+                "---tail:\n"
+                "[INFO] vllm_core::server starting on 0.0.0.0:8111\n"
+                "[INFO] model loaded\n"
+                "---grep xgrammar:\n"
+            ),
+            "stderr": "",
+        },
+        context=SessionContext(
+            recent_user_requests=["продолжаем все отложенное. нужна полная профессиональная реализация"],
+            last_assistant_plan=(
+                "Запускаю с logging и smaller test (1 trial с RUST_LOG для xgrammar)"
+            ),
+            recent_actions=[],
+            recent_bash_actions=bash_history,
+        ),
+    )
+    assert res.error is None, f"SDK failed: {res.error}"
+    reason = (res.verdict.reason or "").lower()
+    # Key regression: must not claim "no curl was sent" or "server didn't
+    # receive the request" — the curl IS in the bash trajectory above
+    # with its 400 response.
+    bad_signals = (
+        "no curl request",
+        "no request to",
+        "didn't receive the request",
+        "server isn't responding",
+    )
+    assert not any(s in reason for s in bad_signals), (
+        f"Watchdog still claims the curl was never sent despite the "
+        f"bash trajectory showing it 2 actions ago.\n"
+        f"  reason: {res.verdict.reason}"
+    )

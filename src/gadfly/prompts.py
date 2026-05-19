@@ -707,6 +707,41 @@ def _render_per_file_snapshots(
     return "\n".join(lines)
 
 
+def _render_recent_bash_actions(
+    actions: list[tuple[int, str, Any, str, str]] | None,
+) -> str:
+    """Render the last N Bash actions with their truncated output.
+
+    Solves the diagnostic-chain blind spot: when the agent ran
+    `curl → grep → tail` over several turns to investigate something,
+    the watchdog used to see only the most recent command. Now it
+    reads the recent thread of (command, exit_code, stdout, stderr)
+    and can recognise "this is step 4 of a debugging conversation,
+    not an isolated symptom-fix".
+
+    Each entry is pre-truncated by the extractor (head + tail with an
+    explicit marker), so rendering here is plain concatenation.
+    """
+    if not actions:
+        return ""
+    lines: list[str] = [
+        "## Recent Bash actions (last N, with truncated output)",
+        "Diagnostic / debug chains commonly span multiple Bash turns. "
+        "Earlier `curl` / `grep` / `tail` calls and their responses are "
+        "below — treat them as the same conversation as the action being "
+        "judged, not as separate stand-alone moves.",
+    ]
+    for idx, cmd, exit_code, stdout, stderr in actions:
+        ec = "?" if exit_code is None else exit_code
+        lines.append(f"\n### #{idx}  exit={ec}")
+        lines.append(f"  command: {cmd}")
+        if stdout:
+            lines.append(f"  stdout:\n{stdout}")
+        if stderr:
+            lines.append(f"  stderr:\n{stderr}")
+    return "\n".join(lines)
+
+
 def _render_file_touch_trajectory(
     trajectory: list[tuple[int, str, str]] | None,
     *,
@@ -743,6 +778,7 @@ def build_user_message(
     latest_user_message_verbatim: str | None = None,
     active_plan: str | None = None,
     recent_dialogue_pairs: list[tuple[str | None, str]] | None = None,
+    recent_bash_actions: list[tuple[int, str, Any, str, str]] | None = None,
     cwd: str | None = None,
 ) -> str:
     """Compose the user-message for Haiku for a single tool-call review.
@@ -799,6 +835,9 @@ def build_user_message(
             traj_block = _render_file_touch_trajectory(file_touch_trajectory, cwd=cwd)
             if traj_block:
                 parts.append(traj_block)
+            bash_block = _render_recent_bash_actions(recent_bash_actions)
+            if bash_block:
+                parts.append(bash_block)
             snap_block = _render_per_file_snapshots(
                 per_file_snapshots,
                 current_target=tool_input.get("file_path")
@@ -891,6 +930,9 @@ def build_user_message(
     traj_block = _render_file_touch_trajectory(file_touch_trajectory, cwd=cwd)
     if traj_block:
         parts.append(traj_block)
+    bash_block = _render_recent_bash_actions(recent_bash_actions)
+    if bash_block:
+        parts.append(bash_block)
     snap_block = _render_per_file_snapshots(
                 per_file_snapshots,
                 current_target=tool_input.get("file_path")

@@ -185,6 +185,7 @@ async def evaluate_async(
         latest_user_message_verbatim=latest_user_msg,
         active_plan=context.active_plan,
         recent_dialogue_pairs=context.recent_dialogue_pairs,
+        recent_bash_actions=context.recent_bash_actions,
         cwd=context.cwd,
     )
     system_prompt_sha = audit_log.ensure_system_prompt(system_prompt)

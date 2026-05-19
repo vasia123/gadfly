@@ -74,6 +74,13 @@ class SessionContext:
     # to an EARLIER assistant proposal, last_assistant_plan alone
     # doesn't carry the context — the full back-and-forth does.
     recent_dialogue_pairs: list[tuple[str | None, str]] = field(default_factory=list)
+    # Last N Bash actions with truncated command + output. Solves the
+    # "diagnostic chain invisible" blind spot: when the agent ran
+    # curl→grep→tail to investigate something across several turns,
+    # the watchdog used to see only the latest command and lost the
+    # context of what came back from earlier ones. Each entry:
+    # (action_index, command, exit_code, stdout, stderr).
+    recent_bash_actions: list[tuple[int, str, Any, str, str]] = field(default_factory=list)
 
     @property
     def last_user_request(self) -> str | None:
@@ -336,6 +343,16 @@ def load(
     except Exception:
         ctx.recent_dialogue_pairs = []
 
+    # Last N Bash actions with their output. Solves the diagnostic-
+    # chain blind spot: agent runs curl@N-5 returning 400, grep@N-3
+    # returning empty, then current Bash → watchdog without this
+    # block sees only the latest call and decides "logs empty,
+    # nothing diagnosed".
+    try:
+        ctx.recent_bash_actions = extract_recent_bash_actions(entries)
+    except Exception:
+        ctx.recent_bash_actions = []
+
     return ctx
 
 
@@ -463,6 +480,173 @@ def extract_active_plan(
             )
         return body
     return None
+
+
+MAX_BASH_ACTIONS = 8
+MAX_BASH_COMMAND = 300
+MAX_BASH_OUTPUT_TOTAL = 800
+MAX_BASH_OUTPUT_HEAD = 500
+MAX_BASH_OUTPUT_TAIL = 250
+
+
+def _extract_tool_uses_with_ids(content: Any) -> list[tuple[str, str, dict[str, Any]]]:
+    """Same shape as `_extract_tool_uses` but also returns the tool_use_id
+    so we can match it to the tool_result block that follows in the next
+    user-role entry."""
+    out: list[tuple[str, str, dict[str, Any]]] = []
+    if isinstance(content, list):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                name = b.get("name")
+                tid = b.get("id")
+                inp = b.get("input")
+                if isinstance(name, str) and isinstance(tid, str) and isinstance(inp, dict):
+                    out.append((name, tid, inp))
+    return out
+
+
+def _extract_tool_results(content: Any) -> dict[str, Any]:
+    """Return {tool_use_id: result_content} for tool_result blocks
+    inside a user-role content list. `result_content` is the raw inner
+    block — string or list of dicts (with `text` / `type`)."""
+    out: dict[str, Any] = {}
+    if isinstance(content, list):
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                tid = b.get("tool_use_id")
+                if isinstance(tid, str):
+                    out[tid] = b.get("content")
+    return out
+
+
+def _bash_result_to_strings(result_content: Any) -> tuple[Any, str, str]:
+    """Coerce a tool_result.content payload into (exit_code, stdout, stderr).
+
+    Claude Code's Bash tool returns its result either as a dict
+    {stdout, stderr, exit_code, ...} (newer transcripts) or as plain
+    text inside a text-block list (older ones). Tolerate both shapes.
+    """
+    exit_code: Any = None
+    stdout = ""
+    stderr = ""
+    if isinstance(result_content, list):
+        # Inspect text blocks; sometimes a single text block contains
+        # the literal JSON payload, other times plain stdout.
+        for b in result_content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                t = b.get("text")
+                if isinstance(t, str):
+                    # Try to parse as JSON if it looks structured.
+                    stripped = t.strip()
+                    if stripped.startswith("{") and stripped.endswith("}"):
+                        try:
+                            parsed = json.loads(stripped)
+                            if isinstance(parsed, dict):
+                                exit_code = parsed.get("exit_code", exit_code)
+                                if isinstance(parsed.get("stdout"), str):
+                                    stdout = parsed["stdout"]
+                                if isinstance(parsed.get("stderr"), str):
+                                    stderr = parsed["stderr"]
+                                continue
+                        except json.JSONDecodeError:
+                            pass
+                    if not stdout:
+                        stdout = t
+                    else:
+                        stdout += "\n" + t
+    elif isinstance(result_content, dict):
+        exit_code = result_content.get("exit_code", exit_code)
+        if isinstance(result_content.get("stdout"), str):
+            stdout = result_content["stdout"]
+        if isinstance(result_content.get("stderr"), str):
+            stderr = result_content["stderr"]
+    elif isinstance(result_content, str):
+        stdout = result_content
+    return exit_code, stdout, stderr
+
+
+def _head_tail_clip(text: str, *, total: int, head: int, tail: int) -> str:
+    """Bytes-budget cut with explicit truncation marker. Same shape as
+    `prompts._head_tail_truncate` but lives here so the extraction
+    layer can prep the strings before they hit the prompt builder.
+    Keeps prompt-side rendering pure formatting."""
+    if not text or len(text) <= total:
+        return text
+    dropped = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n[…{dropped} bytes truncated…]\n"
+        + text[-tail:]
+    )
+
+
+def extract_recent_bash_actions(
+    entries: list[dict[str, Any]],
+    *,
+    max_n: int = MAX_BASH_ACTIONS,
+    max_cmd: int = MAX_BASH_COMMAND,
+    max_output_total: int = MAX_BASH_OUTPUT_TOTAL,
+    max_output_head: int = MAX_BASH_OUTPUT_HEAD,
+    max_output_tail: int = MAX_BASH_OUTPUT_TAIL,
+) -> list[tuple[int, str, Any, str, str]]:
+    """Walk transcript chronologically, build per-action records of
+    Bash tool calls + their tool_result outputs.
+
+    Returns the last `max_n` entries as
+    `[(action_index, command, exit_code, stdout, stderr), ...]`.
+
+    Each output is head+tail truncated so a verbose log can't crowd
+    out the diagnostic signal. The action_index matches the
+    monotonically increasing tool_use counter used by
+    `extract_file_touch_trajectory` so Haiku can correlate.
+    """
+    # First pass — collect all (action_index, command, tool_use_id).
+    bash_calls: list[tuple[int, str, str]] = []
+    action_index = 0
+    for entry in entries:
+        msg = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for name, tid, inp in _extract_tool_uses_with_ids(msg.get("content")):
+            action_index += 1
+            if name != "Bash":
+                continue
+            cmd = str(inp.get("command", "") or "")
+            bash_calls.append((action_index, cmd, tid))
+
+    if not bash_calls:
+        return []
+
+    # Second pass — collect tool_result blocks keyed by tool_use_id.
+    results_by_id: dict[str, Any] = {}
+    for entry in entries:
+        msg = entry.get("message") if isinstance(entry, dict) else None
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        for tid, payload in _extract_tool_results(msg.get("content")).items():
+            results_by_id[tid] = payload
+
+    # Build output records for the last N Bash calls.
+    out: list[tuple[int, str, Any, str, str]] = []
+    for idx, cmd, tid in bash_calls[-max_n:]:
+        exit_code, stdout, stderr = _bash_result_to_strings(
+            results_by_id.get(tid)
+        )
+        cmd_clipped = _clip(cmd, max_cmd)
+        stdout_clipped = _head_tail_clip(
+            stdout,
+            total=max_output_total,
+            head=max_output_head,
+            tail=max_output_tail,
+        )
+        stderr_clipped = _head_tail_clip(
+            stderr,
+            total=max_output_total // 2,
+            head=max_output_head // 2,
+            tail=max_output_tail // 2,
+        )
+        out.append((idx, cmd_clipped, exit_code, stdout_clipped, stderr_clipped))
+    return out
 
 
 def extract_file_touch_trajectory(

@@ -667,3 +667,66 @@ def test_snapshot_render_keeps_path_when_outside_cwd():
     snapshots = {"/tmp/outside.py": "content\n"}
     block = prompts._render_per_file_snapshots(snapshots, cwd="/home/u/proj")
     assert "/tmp/outside.py" in block
+
+
+# --- Recent bash actions rendering -----------------------------------------
+
+
+def test_build_user_message_renders_recent_bash_actions_legacy():
+    actions = [
+        (1, "curl -X POST http://host/api", 0,
+         '{"error":"key must be a string"}', ""),
+        (3, "grep xgrammar /tmp/v18-server.log", 1, "", ""),
+    ]
+    msg = prompts.build_user_message(
+        tool_name="Bash",
+        tool_input={"command": "ls -la /tmp/v18-server.log; tail -20 /tmp/v18-server.log"},
+        tool_response={"stdout": "...", "exit_code": 0},
+        recent_user_requests=["debug the tracing pipeline"],
+        last_assistant_plan="checking logs",
+        recent_actions=[],
+        recent_bash_actions=actions,
+    )
+    assert "Recent Bash actions" in msg
+    # Both prior commands AND their output are visible.
+    assert "curl -X POST" in msg
+    assert "key must be a string" in msg
+    assert "grep xgrammar" in msg
+    assert "exit=1" in msg
+
+
+def test_build_user_message_renders_recent_bash_actions_journal_mode():
+    from gadfly.journal import Journal, Workstream, Drift
+    j = Journal(
+        root_goal="debug tracing",
+        workstreams=[Workstream(id="w1", title="tracing", status="in-progress",
+                                last_touched=5)],
+        drift=Drift(),
+        action_index=5,
+    )
+    actions = [(2, "curl ...", 0, "400 response", "")]
+    msg = prompts.build_user_message(
+        tool_name="Bash",
+        tool_input={"command": "grep ..."},
+        tool_response={"stdout": "", "exit_code": 1},
+        recent_user_requests=["проверь логи"],
+        last_assistant_plan="grep после curl",
+        recent_actions=[],
+        journal=j,
+        recent_bash_actions=actions,
+    )
+    assert "Recent Bash actions" in msg
+    assert "curl ..." in msg
+    assert "400 response" in msg
+
+
+def test_recent_bash_actions_block_skipped_when_empty():
+    msg = prompts.build_user_message(
+        tool_name="Bash",
+        tool_input={"command": "ls"},
+        tool_response={"exit_code": 0},
+        recent_user_requests=["go"],
+        last_assistant_plan=None,
+        recent_actions=[],
+    )
+    assert "Recent Bash actions" not in msg
