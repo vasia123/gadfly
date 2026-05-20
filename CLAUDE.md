@@ -86,6 +86,24 @@ src/gadfly/
   viewer.py     stdlib-only local HTTP server + single-page HTML.
                 Renders journal-update events with diff_summary + a
                 snapshot view via /api/journal_snapshot/<sha>.
+  backends/     Pluggable model transports.
+    base.py        Backend Protocol + BackendResult dataclass.
+    claude_sdk.py  ClaudeSDKBackend — wraps claude-agent-sdk and the
+                   user's Claude Code CLI subscription. Carries the
+                   recursion guards (setting_sources=[], settings="{}",
+                   env={"GADFLY_INTERNAL":"1"}). Default backend.
+    openai_compat.py  OpenAICompatBackend — stdlib urllib client
+                   speaking the OpenAI Chat Completions wire protocol.
+                   Works against OpenAI, Anthropic's OAI-compat
+                   endpoint, OpenRouter, vLLM, llama.cpp, Ollama,
+                   Groq, Together, and any self-hosted endpoint.
+                   No new deps. Forced tool-choice guarantees
+                   structured output.
+    __init__.py    select_backend(name, **kwargs) factory.
+                Pass `backend=` to evaluate_async/evaluate to swap
+                transports; run_corpus.py exposes `--backend`,
+                `--base-url`, `--api-key-env`, `--extra-headers`.
+                Hook stays on claude_sdk for subscription billing.
 scripts/
   probe.py      Live regression probe against real Haiku (no mocks;
                 bills the real subscription). CASES A/B exercise the

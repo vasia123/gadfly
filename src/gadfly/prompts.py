@@ -21,6 +21,22 @@ SUBMIT_VERDICT_INPUT_SCHEMA: dict[str, Any] = {
     "suggestion": str,
 }
 
+# Proper JSON Schema for backends that speak the OpenAI tools spec
+# (Chat Completions, Anthropic's OpenAI-compatible endpoint, etc.).
+# Same fields as SUBMIT_VERDICT_INPUT_SCHEMA but in the standard form
+# the wire protocol expects. The Claude-SDK backend keeps using the
+# dict-of-classes form above because that's what @tool decoder wants.
+SUBMIT_VERDICT_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "professional": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "suggestion": {"type": "string"},
+    },
+    "required": ["professional", "reason", "suggestion"],
+    "additionalProperties": False,
+}
+
 SYSTEM_PROMPT = """\
 You are Gadfly — a watchdog that supervises a Claude Code agent while it works.
 After every code-changing action the agent takes (Edit, Write, MultiEdit, Bash),

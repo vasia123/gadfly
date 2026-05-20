@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from gadfly import watchdog
+from gadfly.backends import claude_sdk as sdk_backend
 from gadfly.session import SessionContext
 
 
@@ -62,15 +63,20 @@ def _runner_that_captures(verdict_args: dict[str, Any] | None):
 
 @pytest.fixture
 def captured_ref(monkeypatch):
-    """Expose the `_Captured` instance the watchdog created to the test."""
-    holder: dict[str, watchdog._Captured] = {}
-    original = watchdog._build_submit_verdict_tool
+    """Expose the `_Captured` container that ClaudeSDKBackend created.
 
-    def patched(captured):
+    The backend's _build_submit_verdict_tool builds an MCP tool closing
+    over the _Captured; we monkeypatch that builder to side-channel the
+    container into the test so the fake `run_query` can write a verdict
+    into it the way the real CLI would."""
+    holder: dict[str, sdk_backend._Captured] = {}
+    original = sdk_backend._build_submit_verdict_tool
+
+    def patched(captured, **kwargs):
         holder["c"] = captured
-        return original(captured)
+        return original(captured, **kwargs)
 
-    monkeypatch.setattr(watchdog, "_build_submit_verdict_tool", patched)
+    monkeypatch.setattr(sdk_backend, "_build_submit_verdict_tool", patched)
     return holder
 
 

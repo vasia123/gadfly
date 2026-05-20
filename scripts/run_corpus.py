@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from gadfly import session as session_mod  # noqa: E402
+from gadfly.backends import select_backend  # noqa: E402
 from gadfly.watchdog import evaluate_async, DEFAULT_MODEL  # noqa: E402
 
 CASES_FILE = ROOT / "tests" / "fixtures" / "watchdog_corpus" / "cases.json"
@@ -60,7 +61,8 @@ def _ctx_from_dict(d: dict) -> session_mod.SessionContext:
     return ctx
 
 
-async def _run_case(case: dict, model: str, timeout_s: float, max_turns: int):
+async def _run_case(case: dict, model: str, timeout_s: float, max_turns: int,
+                    backend=None):
     ctx = _ctx_from_dict(case["session_context"])
     t0 = time.monotonic()
     res = await evaluate_async(
@@ -71,6 +73,7 @@ async def _run_case(case: dict, model: str, timeout_s: float, max_turns: int):
         model=model,
         timeout_s=timeout_s,
         max_turns=max_turns,
+        backend=backend,
     )
     dt = time.monotonic() - t0
     return res, dt
@@ -95,8 +98,38 @@ async def main_async(args):
     if not args.journal_mode:
         os.environ["GADFLY_JOURNAL_VERDICT"] = "0"
 
-    print(f"Model: {args.model}  | cases: {len(cases)}  | "
-          f"journal_mode: {bool(args.journal_mode)}")
+    backend = None
+    if args.backend == "openai_compat":
+        api_key = ""
+        if args.api_key_env and args.api_key_env != "NONE":
+            api_key = os.environ.get(args.api_key_env, "")
+            if not api_key:
+                print(f"WARNING: env var {args.api_key_env} is empty",
+                      file=sys.stderr)
+        if not args.base_url:
+            print("ERROR: --base-url is required for --backend openai_compat",
+                  file=sys.stderr)
+            sys.exit(2)
+        extra: dict[str, str] = {}
+        if args.extra_headers:
+            try:
+                extra = json.loads(args.extra_headers)
+            except json.JSONDecodeError as exc:
+                print(f"ERROR: --extra-headers is not valid JSON: {exc}",
+                      file=sys.stderr)
+                sys.exit(2)
+        backend = select_backend(
+            "openai_compat",
+            base_url=args.base_url,
+            api_key=api_key,
+            extra_headers=extra or None,
+        )
+
+    print(f"Backend: {args.backend}  | model: {args.model}  | "
+          f"cases: {len(cases)}  | journal_mode: {bool(args.journal_mode)}")
+    if args.backend == "openai_compat":
+        masked = (api_key[:4] + "…") if api_key else "(none)"
+        print(f"Endpoint: {args.base_url}  | api_key: {masked}")
     print(f"Timeout: {args.timeout}s per case")
     print("=" * 100)
 
@@ -108,7 +141,9 @@ async def main_async(args):
     for i, case in enumerate(cases):
         cid = case["case_id"]
         try:
-            res, dt = await _run_case(case, args.model, args.timeout, args.max_turns)
+            res, dt = await _run_case(
+                case, args.model, args.timeout, args.max_turns, backend=backend,
+            )
         except Exception as exc:
             print(f"[{i:02d}] {cid:25s} ERROR {exc!r}")
             n_error += 1
@@ -165,7 +200,23 @@ def main():
     p.add_argument("--timeout", type=float, default=60.0)
     p.add_argument("--max-turns", type=int, default=4,
                    help="SDK max_turns. Haiku needs 2; Sonnet/Opus often "
-                        "need 4+. Default 4 works across models.")
+                        "need 4+. Default 4 works across models. "
+                        "Ignored for --backend openai_compat.")
+    p.add_argument("--backend", choices=("claude_sdk", "openai_compat"),
+                   default="claude_sdk",
+                   help="Backend transport. Default: claude_sdk (subscription).")
+    p.add_argument("--base-url", default=None,
+                   help="Required for --backend openai_compat. "
+                        "Examples: https://api.openai.com/v1, "
+                        "https://api.anthropic.com/v1, "
+                        "https://openrouter.ai/api/v1, "
+                        "http://localhost:8000/v1.")
+    p.add_argument("--api-key-env", default="OPENAI_API_KEY",
+                   help="Env var holding the API key (default: OPENAI_API_KEY). "
+                        "Pass NONE for unauthenticated local endpoints.")
+    p.add_argument("--extra-headers", default=None,
+                   help='Extra request headers as JSON, e.g. '
+                        '\'{"anthropic-version":"2023-06-01"}\'.')
     p.add_argument("--only", help="Run only the case with this id")
     p.add_argument("--out", help="Write JSON report to this path")
     p.add_argument(

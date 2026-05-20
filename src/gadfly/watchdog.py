@@ -1,48 +1,37 @@
-"""Call Haiku to grade a single Claude Code tool action.
+"""Grade a single Claude Code tool action by calling a model and parsing
+its forced tool-call back into a Verdict.
 
-This is a one-shot, non-agentic call. We hand Haiku:
-  - the gadfly system prompt (the "professional or not" rubric),
-  - a user-message describing the action and its context, and
-  - exactly one tool: `submit_verdict(professional, reason, suggestion)`.
+This module owns:
+  - selection of the system prompt (legacy vs journal-aware),
+  - assembly of the user message (delegated to prompts.build_user_message),
+  - the EvaluationResult wrapper used by the hook / audit log.
 
-Haiku must call that tool exactly once; we capture its arguments and turn
-them into a Verdict.
+It does NOT own the wire protocol. That lives in `backends/`. The
+default backend is `ClaudeSDKBackend` (claude-agent-sdk + the user's
+Claude Code CLI subscription); callers can pass any other backend for
+corpus benchmarking or self-hosted endpoints.
 
-Backend: `claude-agent-sdk` running on top of the user's authenticated
-Claude Code CLI. This bills against the user's existing Claude subscription
-instead of requiring a separate ANTHROPIC_API_KEY.
-
-Two safety properties we must preserve at all costs:
-  1. Never break the parent Claude Code session. Any failure (timeout,
-     transport error, CLI missing, no verdict) becomes a silent_ok verdict
-     plus a logged error.
-  2. Never recurse. The inner CLI must not pick up the same PostToolUse
-     hook. Enforced two ways:
-        - `setting_sources=[]` so the inner CLI ignores
-          ~/.claude/settings.json (where our hook is wired in),
-        - `env={"GADFLY_INTERNAL": "1"}` as a belt-and-braces check that
-          hook.py reads on startup and exits early when set.
+Two safety properties we preserve at all costs (regardless of backend):
+  1. Never break the parent Claude Code session. Any failure
+     (timeout, transport error, CLI missing, no verdict) becomes a
+     silent_ok verdict plus a logged error.
+  2. The Claude-SDK backend never recurses (see CLAUDE.md §3 — those
+     guards live in backends/claude_sdk.py).
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from claude_agent_sdk import (
-    ClaudeAgentOptions,
-    ThinkingConfigDisabled,
-    create_sdk_mcp_server,
-    query,
-    tool,
-)
-
 from . import log as audit_log
+from .backends import Backend, BackendResult, ClaudeSDKBackend
+from .backends.claude_sdk import DEFAULT_MAX_TURNS
 from .prompts import (
     SUBMIT_VERDICT_DESCRIPTION,
-    SUBMIT_VERDICT_INPUT_SCHEMA,
+    SUBMIT_VERDICT_JSON_SCHEMA,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_JOURNAL,
     build_user_message,
@@ -58,81 +47,23 @@ def _select_system_prompt(use_journal: bool) -> str:
         return SYSTEM_PROMPT_JOURNAL
     return SYSTEM_PROMPT
 
+
 DEFAULT_MODEL = "claude-haiku-4-5"
-DEFAULT_TIMEOUT_S = 60.0  # CLI cold start ~10s first time, ~2-3s warm; Haiku adds 1-3s
-DEFAULT_MAX_TURNS = 2  # turn 1: submit_verdict tool_use; turn 2: Haiku must
-# close out after receiving the tool_result. max_turns=1 trips
-# "Reached maximum number of turns" — empirically verified.
+DEFAULT_TIMEOUT_S = 60.0  # CLI cold start ~10s first time, ~2-3s warm; model adds 1-3s
 
 
 @dataclass(frozen=True)
 class EvaluationResult:
     verdict: Verdict
     error: str | None  # human-readable error or None on success
-    user_message: str = ""  # the exact prompt we sent Haiku (for the audit log)
+    user_message: str = ""  # the exact prompt we sent the model (audit log)
     system_prompt_sha: str = ""  # sha of the SYSTEM_PROMPT at evaluation time
 
 
-@dataclass
-class _Captured:
-    """Closed-over container that the submit_verdict tool writes into."""
-
-    verdict_args: dict[str, Any] | None = None
-
-
-def _build_submit_verdict_tool(captured: _Captured):
-    @tool("submit_verdict", SUBMIT_VERDICT_DESCRIPTION, SUBMIT_VERDICT_INPUT_SCHEMA)
-    async def submit_verdict(args: dict[str, Any]) -> dict[str, Any]:
-        captured.verdict_args = args
-        return {"content": [{"type": "text", "text": "verdict recorded"}]}
-
-    return submit_verdict
-
-
-def _build_options(captured: _Captured, model: str, system_prompt: str = SYSTEM_PROMPT, max_turns: int = DEFAULT_MAX_TURNS) -> ClaudeAgentOptions:
-    server = create_sdk_mcp_server(
-        "gadfly",
-        "1.0.0",
-        [_build_submit_verdict_tool(captured)],
-    )
-    return ClaudeAgentOptions(
-        model=model,
-        system_prompt=system_prompt,
-        mcp_servers={"gadfly": server},
-        allowed_tools=["mcp__gadfly__submit_verdict"],
-        permission_mode="bypassPermissions",
-        setting_sources=[],
-        # CRITICAL recursion guard: pass an EMPTY settings object via
-        # `--settings '{}'`. Without this the inner CLI inherits hooks from
-        # the user's ~/.claude/settings.json (cc-telegram-notify Stop /
-        # Notification, our own gadfly hook, etc.) and fires phantom
-        # notifications when its own turn ends. The `hooks={}` option in
-        # ClaudeAgentOptions sounds like the right knob but it is for SDK-
-        # internal Python hook callbacks; subprocess_cli.py does NOT
-        # translate it to a CLI flag. Verified by reading SDK source.
-        settings="{}",
-        # Extended thinking is wasted latency for one-shot classification
-        # with a forced tool call — disable it explicitly. CAUTION:
-        # `ThinkingConfigDisabled` is a TypedDict, not a dataclass, so
-        # calling it with no arguments silently produces `{}` and the SDK
-        # then explodes with `KeyError('type')`. The `type=` kwarg below
-        # is mandatory. Covered by tests/test_live.py::test_evaluate_*.
-        thinking=ThinkingConfigDisabled(type="disabled"),
-        max_turns=max_turns,
-        env={"GADFLY_INTERNAL": "1"},
-    )
-
-
-# Default query-runner. Tests substitute this via the `run_query` parameter
-# to avoid spawning a real CLI.
-async def _default_run_query(prompt: str, options: ClaudeAgentOptions) -> None:
-    async for _ in query(prompt=prompt, options=options):
-        # We don't care about the message stream — we only need the iterator
-        # to drive the SDK forward so the submit_verdict callback fires.
-        pass
-
-
-RunQuery = Callable[[str, ClaudeAgentOptions], Awaitable[None]]
+# Back-compat type alias: tests that pass `run_query=...` keep working
+# because evaluate_async wraps the callable in a ClaudeSDKBackend
+# constructed with that run_query.
+RunQuery = Callable[[str, Any], Awaitable[None]]
 
 
 async def evaluate_async(
@@ -143,21 +74,16 @@ async def evaluate_async(
     context: SessionContext,
     model: str = DEFAULT_MODEL,
     timeout_s: float = DEFAULT_TIMEOUT_S,
-    run_query: RunQuery = _default_run_query,
+    run_query: RunQuery | None = None,
     max_turns: int = DEFAULT_MAX_TURNS,
+    backend: Backend | None = None,
 ) -> EvaluationResult:
-    captured = _Captured()
-    # Phase 2 is the default — verdict reads the journal when one is
-    # supplied. Rollback to Phase 1 (legacy prompt) by setting
-    # GADFLY_JOURNAL_VERDICT=0.
     use_journal = (
         context.journal is not None
         and os.environ.get("GADFLY_JOURNAL_VERDICT", "1") != "0"
     )
     system_prompt = _select_system_prompt(use_journal)
-    options = _build_options(captured, model, system_prompt=system_prompt, max_turns=max_turns)
-    # E2: pull verdict_patterns from project_state for this cwd, so the
-    # journal-mode prompt can render them. Cheap (one JSON read).
+
     verdict_patterns: dict[str, Any] | None = None
     if use_journal and context.cwd:
         try:
@@ -199,19 +125,30 @@ async def evaluate_async(
             system_prompt_sha=system_prompt_sha,
         )
 
-    try:
-        await asyncio.wait_for(run_query(user_message, options), timeout=timeout_s)
-    except asyncio.TimeoutError:
-        return _result(Verdict.silent_ok(), f"timeout after {timeout_s}s")
-    except FileNotFoundError as exc:
-        # claude CLI not on PATH
-        return _result(Verdict.silent_ok(), f"claude CLI not found: {exc!s}")
-    except Exception as exc:
-        return _result(Verdict.silent_ok(), f"agent-sdk error: {exc!r}")
+    if backend is None:
+        # Back-compat with the run_query injection used by unit tests.
+        if run_query is not None:
+            backend = ClaudeSDKBackend(run_query=run_query, max_turns=max_turns)
+        else:
+            backend = ClaudeSDKBackend(max_turns=max_turns)
 
-    if captured.verdict_args is None:
-        return _result(Verdict.silent_ok(), "Haiku did not call submit_verdict")
-    return _result(Verdict.from_tool_input(captured.verdict_args), None)
+    try:
+        br: BackendResult = await backend.evaluate(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            model=model,
+            tool_name="submit_verdict",
+            tool_description=SUBMIT_VERDICT_DESCRIPTION,
+            tool_parameters=SUBMIT_VERDICT_JSON_SCHEMA,
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        # Backend itself crashed before returning a BackendResult — stay silent.
+        return _result(Verdict.silent_ok(), f"backend crashed: {exc!r}")
+
+    if br.verdict_args is None:
+        return _result(Verdict.silent_ok(), br.error or "no verdict")
+    return _result(Verdict.from_tool_input(br.verdict_args), None)
 
 
 def evaluate(
@@ -222,8 +159,9 @@ def evaluate(
     context: SessionContext,
     model: str = DEFAULT_MODEL,
     timeout_s: float = DEFAULT_TIMEOUT_S,
-    run_query: RunQuery = _default_run_query,
+    run_query: RunQuery | None = None,
     max_turns: int = DEFAULT_MAX_TURNS,
+    backend: Backend | None = None,
 ) -> EvaluationResult:
     """Sync entry point used by the hook."""
     try:
@@ -237,11 +175,10 @@ def evaluate(
                 timeout_s=timeout_s,
                 run_query=run_query,
                 max_turns=max_turns,
+                backend=backend,
             )
         )
     except Exception as exc:
-        # asyncio.run itself can fail (e.g., already-running loop in some
-        # bizarre embedding). Stay silent.
         return EvaluationResult(
             verdict=Verdict.silent_ok(),
             error=f"asyncio.run failed: {exc!r}",
