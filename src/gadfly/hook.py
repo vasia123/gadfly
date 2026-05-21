@@ -37,6 +37,35 @@ from . import log as audit_log
 from . import journal, project_state, session, watchdog
 from .verdict import Verdict
 
+
+def _load_env_file_once() -> None:
+    """Load `<gadfly_repo>/.env` into os.environ at hook startup, so the
+    user's OPENROUTER_API_KEY and GADFLY_* steering vars (BACKEND, MODEL,
+    BASE_URL) are visible to the watchdog without touching settings.json.
+
+    Best-effort: silently no-op if the file is missing or malformed.
+    Existing env vars are NOT overwritten (so settings.json env still wins).
+    """
+    try:
+        from pathlib import Path
+        env_path = Path(__file__).resolve().parents[2] / ".env"
+        if not env_path.is_file():
+            return
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except Exception:
+        pass
+
+
 WATCHED_TOOLS = {"Edit", "Write", "MultiEdit", "Bash"}
 
 
@@ -246,6 +275,13 @@ def _emit_hook_output(output: dict[str, Any] | None) -> None:
 
 def main() -> int:
     try:
+        # Load .env BEFORE checking any GADFLY_* steering vars, so the
+        # user's `.env` (e.g. backend=openai_compat + model=...) takes
+        # effect on every hook invocation. Called inside main() rather
+        # than at module-import time so that tests importing this module
+        # don't get their os.environ contaminated.
+        _load_env_file_once()
+
         if os.environ.get("GADFLY_DISABLE") == "1":
             return 0
         # Recursion guard: when this hook is somehow triggered from inside

@@ -181,9 +181,14 @@ def test_timeout(captured_ref):
     assert res.error and "timeout" in res.error
 
 
-def test_options_block_recursion(captured_ref):
+def test_options_block_recursion(captured_ref, monkeypatch):
     """The watchdog must wire setting_sources=[] and GADFLY_INTERNAL=1 so the
     inner CLI does not pick up gadfly's own hook."""
+    # Test asserts opts.model == DEFAULT_MODEL — clear any GADFLY_MODEL
+    # override that another test (e.g. test_hook running main() which
+    # loads .env) may have left behind in os.environ.
+    monkeypatch.delenv("GADFLY_MODEL", raising=False)
+    monkeypatch.delenv("GADFLY_BACKEND", raising=False)
     captured_options: dict = {}
 
     async def runner(prompt, options):

@@ -52,6 +52,46 @@ DEFAULT_MODEL = "claude-haiku-4-5"
 DEFAULT_TIMEOUT_S = 60.0  # CLI cold start ~10s first time, ~2-3s warm; model adds 1-3s
 
 
+def _default_model_from_env() -> str:
+    """`GADFLY_MODEL` env var overrides the compiled-in DEFAULT_MODEL.
+    Hook respects this so the user can flip provider/model from settings
+    or .env without code changes."""
+    return os.environ.get("GADFLY_MODEL") or DEFAULT_MODEL
+
+
+def _default_backend_from_env() -> Backend | None:
+    """Build a Backend from env vars when the caller hasn't passed one.
+
+    Active when GADFLY_BACKEND=openai_compat is set. Expected companion
+    vars: GADFLY_BASE_URL (required), GADFLY_API_KEY_ENV (name of the
+    env var holding the key; default OPENROUTER_API_KEY),
+    GADFLY_EXTRA_HEADERS (optional JSON). Returns None if env config
+    is incomplete or unset — caller then falls back to ClaudeSDKBackend.
+    """
+    name = os.environ.get("GADFLY_BACKEND", "").strip()
+    if name != "openai_compat":
+        return None
+    base_url = os.environ.get("GADFLY_BASE_URL", "").strip()
+    if not base_url:
+        return None
+    key_env = os.environ.get("GADFLY_API_KEY_ENV", "OPENROUTER_API_KEY").strip()
+    api_key = os.environ.get(key_env, "") if key_env and key_env != "NONE" else ""
+    extra = None
+    raw = os.environ.get("GADFLY_EXTRA_HEADERS", "").strip()
+    if raw:
+        try:
+            import json as _json
+            parsed = _json.loads(raw)
+            if isinstance(parsed, dict):
+                extra = parsed
+        except Exception:
+            extra = None
+    from .backends.openai_compat import OpenAICompatBackend
+    return OpenAICompatBackend(
+        base_url=base_url, api_key=api_key, extra_headers=extra
+    )
+
+
 @dataclass(frozen=True)
 class EvaluationResult:
     verdict: Verdict
@@ -130,7 +170,14 @@ async def evaluate_async(
         if run_query is not None:
             backend = ClaudeSDKBackend(run_query=run_query, max_turns=max_turns)
         else:
-            backend = ClaudeSDKBackend(max_turns=max_turns)
+            # Env may steer us to OpenAI-compat (e.g. OpenRouter + Mistral).
+            backend = _default_backend_from_env()
+            if backend is None:
+                backend = ClaudeSDKBackend(max_turns=max_turns)
+    if model == DEFAULT_MODEL:
+        # Allow GADFLY_MODEL override at the default call-site without
+        # affecting callers that pass an explicit model.
+        model = _default_model_from_env()
 
     try:
         br: BackendResult = await backend.evaluate(

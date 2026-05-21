@@ -318,19 +318,37 @@ Default: ON. `GADFLY_HISTORIAN_PRIORS=0` rolls back.
 
 These are the load-bearing decisions. Don't undo them without reading why.
 
-### 1. Backend is claude-agent-sdk, not the direct `anthropic` package
+### 1. Backend is env-selectable; production currently points at Mistral Small 4 via OpenRouter
 
-Earlier in the project we used the direct `anthropic` SDK with an
-ANTHROPIC_API_KEY. We switched to `claude-agent-sdk` because the user
-prefers to bill against their existing Claude subscription rather than a
-separate API key. The trade-off: cold start is ~10-20s per hook
-invocation (Claude Code CLI subprocess spin-up) instead of ~100ms for a
-direct HTTPS call.
+Two production paths supported (both implemented as `Backend`s in
+`src/gadfly/backends/`):
 
-If you ever consider switching back, the user's preference is explicit —
-ask first. A future optimisation is a long-lived daemon that keeps one
-warm `ClaudeSDKClient` per session and exposes a unix socket the hook
-talks to; that gets you both subscription billing AND fast latency.
+  - `claude_sdk` — wraps claude-agent-sdk + the user's Claude Code CLI
+    subscription. Cold start ~10-20s; subscription billing.
+  - `openai_compat` — stdlib `urllib.request` against any
+    /v1/chat/completions endpoint. ~3-5s latency.
+
+The hook reads `<gadfly_repo>/.env` at startup (see `_load_env_file_once`
+in hook.py) and the watchdog then resolves the backend + model from
+these env vars:
+
+    GADFLY_BACKEND       = "openai_compat" | "claude_sdk" (default fallback)
+    GADFLY_BASE_URL      = https://openrouter.ai/api/v1
+    GADFLY_API_KEY_ENV   = OPENROUTER_API_KEY (name of the env var holding the key)
+    GADFLY_MODEL         = mistralai/mistral-small-2603
+    GADFLY_EXTRA_HEADERS = optional JSON (e.g. anthropic-version)
+
+Current production .env values (NOT committed): Mistral Small 4 via
+OpenRouter. Validation: F1 0.64 in docs/model_comparison.md, ~6× cheaper
+than Haiku via OR, latency ~3s typical.
+
+Roll back to subscription-billed Haiku by removing the GADFLY_* lines
+from .env (they fall through to ClaudeSDKBackend + claude-haiku-4-5).
+
+**Test-isolation pitfall:** `_load_env_file_once` is called inside
+`main()`, not at module import. Otherwise `tests/test_hook.py`'s import
+contaminates `os.environ` for every other test (we hit this; see
+`test_options_block_recursion` for the `monkeypatch.delenv` guard).
 
 ### 2. Structured output via in-process MCP tool, not text-parsing
 
