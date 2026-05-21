@@ -43,47 +43,49 @@ precision discussion with their silent-default behaviour.
 |---|---|---|---|---|---|
 | 1 | openai/gpt-4o-mini | **100.0%** | 13.3% | 0.24 | $0.75 / $3.00 |
 | 2 | openai/gpt-5.4-nano | 79.2% | 26.7% | 0.40 | $0.20 / $1.25 |
-| 2 | **mistralai/mistral-small-2603** (Mistral Small 4) | 79.2% | 53.3% | **0.64** | **$0.15 / $0.60** |
+| 2 | **mistral-small-latest** (`mistral-small-2603`) | 79.2% | 53.3% | **0.64** | **$0.10 / $0.30** (Mistral native) |
 | 2 | inclusionai/ling-2.6-1t | 79.2% | **6.7%** | 0.12 | $0.08 / $0.63 |
 | 5 | **claude-haiku-4-5** | 75.0% | **66.7%** | **0.71** | $1.00 / $5.00 |
 | 6 | **google/gemini-3.1-flash-lite-preview** | 62.5% | **73.3%** | **0.68** | $0.25 / $1.50 |
-| 7 | google/gemini-2.5-flash-lite | 58.3% | — | — | $0.10 / $0.40 |
-| 8 | google/gemini-3.1-flash-lite (non-preview) | 54.2% | — | — | $0.25 / $1.50 |
-| 9 | x-ai/grok-build-0.1 | 45.8% | — | — | $1.00 / $2.00 |
-| 10 | ibm-granite/granite-4.1-8b | 33.3% | — | — | $0.05 / $0.10 |
-| 11 | kwaipilot/kat-coder-pro-v2 | 29.2% | — | — | $0.30 / $1.20 |
-| 11 | google/gemini-2.5-flash | 29.2% | — | — | $0.30 / $2.50 |
-| 13 | inclusionai/ling-2.6-flash | 20.8% | — | — | $0.01 / $0.03 |
-| 13 | arcee-ai/trinity-large-thinking | 20.8% | — | — | $0.22 / $0.85 |
-| 13 | qwen/qwen3-coder-next | 20.8% | — | — | — |
-| 13 | qwen/qwen3-235b-a22b-2507 | 20.8% | — | — | — |
-| 17 | inclusionai/ring-2.6-1t | 16.7% | — | — | $0.08 / $0.63 |
-| 18 | claude-sonnet-4-6 | 12.5% | — | — | $3.00 / $15.00 |
-| 18 | qwen/qwen3.6-35b-a3b | 12.5% | — | — | $0.15 / $1.00 |
-| 18 | openai/gpt-oss-120b | 12.5% | — | — | — |
-| 18 | google/gemma-4-31b-it | 12.5% | — | — | $0.12 / $0.37 |
-| 18 | deepseek/deepseek-v4-flash | 12.5% | — | — | $0.11 / $0.22 |
-| 23 | z-ai/glm-4.7-flash | 8.3% | — | — | — |
-| 23 | xiaomi/mimo-v2.5-pro | 8.3% | — | — | $1.00 / $3.00 |
-| 23 | x-ai/grok-4.3 | 8.3% | — | — | $1.25 / $2.50 |
-| 23 | qwen/qwen3.5-35b-a3b | 8.3% | — | — | $0.14 / $1.00 |
-| 27 | qwen/qwen3.5-27b | 4.2% | — | — | $0.19 / $1.56 |
-| 27 | openai/gpt-5.1-codex-mini | 4.2% | — | — | — |
-| 27 | minimax/minimax-m2.7 | 4.2% | — | — | $0.28 / $1.20 |
-| 27 | google/gemma-4-26b-a4b-it | 4.2% | — | — | $0.06 / $0.33 |
-| 31 | qwen/qwen3.6-flash | 0.0% | — | — | $0.19 / $1.13 |
-| 31 | qwen/qwen3.6-plus | 0.0% | — | — | $0.32 / $1.95 |
-| 31 | qwen/qwen3.5-plus-20260420 | 0.0% | — | — | $0.30 / $1.80 |
-| 31 | z-ai/glm-5.1 | 0.0% | — | — | (free promo) |
-| 31 | tencent/hy3-preview | 0.0% | — | — | $0.07 / $0.26 |
-| 31 | perceptron/perceptron-mk1 | 0.0% | — | — | $0.15 / $1.50 |
-| 31 | nvidia/nemotron-3-super-120b-a12b | 0.0% | — | — | $0.09 / $0.45 |
-| 31 | nvidia/nemotron-3-nano-30b-a3b:free | 0.0% | — | — | free |
-| 31 | moonshotai/kimi-k2.6 | 0.0% | — | — | $0.73 / $3.49 |
-| 31 | inception/mercury-2 | 0.0% | — | — | $0.25 / $0.75 |
-| 31 | deepseek/deepseek-v4-pro | 0.0% | — | — | $0.44 / $0.87 |
-| 31 | bytedance-seed/seed-2.0-mini | 0.0% | — | — | $0.10 / $0.40 |
-| 31 | baidu/cobuddy:free | 0.0% | — | — | free |
+| 6 | **codestral-latest** | 62.5% | 60.0% | **0.61** | $0.30 / $0.90 (Mistral native) |
+| 8 | google/gemini-2.5-flash-lite | 58.3% | — | — | $0.10 / $0.40 |
+| 9 | google/gemini-3.1-flash-lite (non-preview) | 54.2% | — | — | $0.25 / $1.50 |
+| 10 | x-ai/grok-build-0.1 | 45.8% | — | — | $1.00 / $2.00 |
+| 11 | ibm-granite/granite-4.1-8b | 33.3% | — | — | $0.05 / $0.10 |
+| 12 | kwaipilot/kat-coder-pro-v2 | 29.2% | — | — | $0.30 / $1.20 |
+| 12 | google/gemini-2.5-flash | 29.2% | — | — | $0.30 / $2.50 |
+| 14 | inclusionai/ling-2.6-flash | 20.8% | — | — | $0.01 / $0.03 |
+| 14 | arcee-ai/trinity-large-thinking | 20.8% | — | — | $0.22 / $0.85 |
+| 14 | qwen/qwen3-coder-next | 20.8% | — | — | — |
+| 14 | qwen/qwen3-235b-a22b-2507 | 20.8% | — | — | — |
+| 18 | inclusionai/ring-2.6-1t | 16.7% | — | — | $0.08 / $0.63 |
+| 19 | claude-sonnet-4-6 | 12.5% | — | — | $3.00 / $15.00 |
+| 19 | qwen/qwen3.6-35b-a3b | 12.5% | — | — | $0.15 / $1.00 |
+| 19 | openai/gpt-oss-120b | 12.5% | — | — | — |
+| 19 | google/gemma-4-31b-it | 12.5% | — | — | $0.12 / $0.37 |
+| 19 | deepseek/deepseek-v4-flash | 12.5% | — | — | $0.11 / $0.22 |
+| 24 | z-ai/glm-4.7-flash | 8.3% | — | — | — |
+| 24 | xiaomi/mimo-v2.5-pro | 8.3% | — | — | $1.00 / $3.00 |
+| 24 | x-ai/grok-4.3 | 8.3% | — | — | $1.25 / $2.50 |
+| 24 | qwen/qwen3.5-35b-a3b | 8.3% | — | — | $0.14 / $1.00 |
+| 28 | qwen/qwen3.5-27b | 4.2% | — | — | $0.19 / $1.56 |
+| 28 | openai/gpt-5.1-codex-mini | 4.2% | — | — | — |
+| 28 | minimax/minimax-m2.7 | 4.2% | — | — | $0.28 / $1.20 |
+| 28 | google/gemma-4-26b-a4b-it | 4.2% | — | — | $0.06 / $0.33 |
+| 32 | qwen/qwen3.6-flash | 0.0% | — | — | $0.19 / $1.13 |
+| 32 | qwen/qwen3.6-plus | 0.0% | — | — | $0.32 / $1.95 |
+| 32 | qwen/qwen3.5-plus-20260420 | 0.0% | — | — | $0.30 / $1.80 |
+| 32 | z-ai/glm-5.1 | 0.0% | — | — | (free promo) |
+| 32 | tencent/hy3-preview | 0.0% | — | — | $0.07 / $0.26 |
+| 32 | perceptron/perceptron-mk1 | 0.0% | — | — | $0.15 / $1.50 |
+| 32 | nvidia/nemotron-3-super-120b-a12b | 0.0% | — | — | $0.09 / $0.45 |
+| 32 | nvidia/nemotron-3-nano-30b-a3b:free | 0.0% | — | — | free |
+| 32 | moonshotai/kimi-k2.6 | 0.0% | — | — | $0.73 / $3.49 |
+| 32 | inception/mercury-2 | 0.0% | — | — | $0.25 / $0.75 |
+| 32 | deepseek/deepseek-v4-pro | 0.0% | — | — | $0.44 / $0.87 |
+| 32 | bytedance-seed/seed-2.0-mini | 0.0% | — | — | $0.10 / $0.40 |
+| 32 | baidu/cobuddy:free | 0.0% | — | — | free |
+| 32 | devstral-small-latest | 0.0% | — | — | $0.10 / $0.30 (Mistral native) |
 
 ## Conclusions
 
@@ -91,23 +93,28 @@ precision discussion with their silent-default behaviour.
    and precision (67%). The rubric is calibrated for Haiku's
    interpretation.
 
-2. **Two credible non-Anthropic alternatives:**
+2. **Three credible non-Anthropic alternatives** (all F1 ≥ 0.60):
 
    - **Gemini 3.1 Flash Lite Preview**: F1 0.68 — within 0.03 of
      Haiku. Higher precision than Haiku (73.3% vs 66.7%) at lower
-     recall (62.5% vs 75%). $0.25/$1.50 — 4× cheaper than Haiku
-     via OpenRouter.
-   - **Mistral Small 4** (`mistralai/mistral-small-2603`): F1 0.64.
-     Same 79.2% recall as gpt-5.4-nano but precision 53.3% (2×
-     higher). $0.15/$0.60 — **6× cheaper than Haiku, 1.7× cheaper
-     than Gemini 3.1 Flash Lite Preview**. The new price/quality
-     champion.
+     recall (62.5% vs 75%). $0.25/$1.50 via OpenRouter.
+   - **mistral-small-latest** (`mistralai/mistral-small-2603`):
+     F1 0.64. Same 79.2% recall as gpt-5.4-nano but precision
+     53.3% (2× higher). **$0.10/$0.30 via Mistral's native API**
+     — 10× cheaper than Haiku, cheapest credible option overall.
+     Currently in production.
+   - **codestral-latest**: F1 0.61. Lower recall (62.5%) than
+     mistral-small but better precision (60%). Mistral's
+     code-focused variant — useful when noise tolerance is low.
+     $0.30/$0.90 via Mistral native.
 
    Curiosities in the Gemini line: the full `gemini-2.5-flash`
    (29.2% recall) underperforms its own `flash-lite` sibling
    (58.3%) — full models are more conservative on this rubric
    than their distilled variants. Same pattern with `gemini-3.1`:
-   preview > non-preview on recall.
+   preview > non-preview on recall. And `devstral-small-latest`
+   (Mistral's other coding variant) scores 0/24 — the codestral
+   /devstral split is starker than the small/preview split.
 
 3. **Two recall traps to avoid.** Both flag almost everything,
    inflating recall to ~80-100% while precision collapses:
@@ -162,8 +169,16 @@ precision discussion with their silent-default behaviour.
 # Negative (15 cases) — same default backend
 .venv/bin/python scripts/run_corpus.py --negative --out /tmp/out_neg.json
 
-# OpenAI-compat against OpenRouter
+# OpenAI-compat against Mistral's native API (current production)
 set -a && . .env && set +a
+.venv/bin/python scripts/run_corpus.py \
+  --backend openai_compat \
+  --base-url https://api.mistral.ai/v1 \
+  --api-key-env MISTRAL_API_KEY \
+  --model mistral-small-latest \
+  --out /tmp/mistral.json
+
+# Or against OpenRouter (for non-Mistral models)
 .venv/bin/python scripts/run_corpus.py \
   --backend openai_compat \
   --base-url https://openrouter.ai/api/v1 \
@@ -191,6 +206,8 @@ Baselines with **both** recall and precision measured:
   `baseline_negative_gemini-3.1-flash-lite-preview.json`
 - `baseline_mistral-small-2603.json` /
   `baseline_negative_mistral-small-2603.json`
+- `baseline_codestral-latest.json` /
+  `baseline_negative_codestral-latest.json`
 - `baseline_ling-2.6-1t.json` / `baseline_negative_ling-2.6-1t.json`
 
 Recall only (less interesting for F1 ranking, kept for diff
@@ -203,6 +220,7 @@ tracking on future regressions):
 - `baseline_ling-2.6-flash.json`
 - `baseline_trinity-large-thinking.json`
 - `baseline_qwen3.5-35b-a3b.json` / `baseline_qwen3.6-flash.json`
+- `baseline_devstral-small-latest.json` (recall only — 0/24)
 - `baseline_seed-2.0-mini.json`
 - `baseline_nemotron-3-super-120b.json`
 - `baseline_mercury-2.json`

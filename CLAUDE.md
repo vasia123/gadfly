@@ -333,14 +333,17 @@ in hook.py) and the watchdog then resolves the backend + model from
 these env vars:
 
     GADFLY_BACKEND       = "openai_compat" | "claude_sdk" (default fallback)
-    GADFLY_BASE_URL      = https://openrouter.ai/api/v1
-    GADFLY_API_KEY_ENV   = OPENROUTER_API_KEY (name of the env var holding the key)
-    GADFLY_MODEL         = mistralai/mistral-small-2603
+    GADFLY_BASE_URL      = https://api.mistral.ai/v1
+    GADFLY_API_KEY_ENV   = MISTRAL_API_KEY (name of the env var holding the key)
+    GADFLY_MODEL         = mistral-small-latest
     GADFLY_EXTRA_HEADERS = optional JSON (e.g. anthropic-version)
 
-Current production .env values (NOT committed): Mistral Small 4 via
-OpenRouter. Validation: F1 0.64 in docs/model_comparison.md, ~6× cheaper
-than Haiku via OR, latency ~3s typical.
+Current production .env values (NOT committed): mistral-small-latest
+via Mistral's native API at $0.10/$0.30 per M tokens. Validation:
+F1 0.64 in docs/model_comparison.md, 10× cheaper than Haiku via OR,
+no middleman fee, latency p50 ~2.3s. Previously used OpenRouter
+which charges a 5.5% credit-purchase fee — switched to direct
+Mistral API once the user signed up at console.mistral.ai.
 
 Roll back to subscription-billed Haiku by removing the GADFLY_* lines
 from .env (they fall through to ClaudeSDKBackend + claude-haiku-4-5).
