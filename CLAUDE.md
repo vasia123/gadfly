@@ -118,30 +118,55 @@ scripts/
                 into tests/fixtures/watchdog_corpus/cases.json.
                 Replayable forever, machine-portable (snapshots frozen
                 inline). Re-run whenever new ack-worthy flags accumulate.
+                Two modes via --mode: `positive` (default; agent acked
+                the flag — recall corpus) and `negative` (agent pushed
+                back; flag was a watchdog FP — precision corpus, output
+                to cases_negative.json). 24 positive, 15 negative.
   run_corpus.py Replays the corpus through evaluate() with a chosen
-                model (--model, default Haiku). Prints per-case ✓/✗
-                and aggregate catch rate; writes JSON report via --out.
-                Cost ~5 min for the full corpus via subscription billing.
+                model (--model, default Haiku) and backend
+                (--backend claude_sdk|openai_compat). For OpenAI-compat:
+                --base-url, --api-key-env, --extra-headers. For negative
+                corpus: --negative (auto-loads cases_negative.json,
+                flips success criterion: silence = success). Prints
+                per-case ✓/✗ and aggregate rate; writes JSON via --out.
+                Cost ~5 min full positive corpus via subscription.
   compare_corpus.py
                 Diffs two run_corpus reports. Reports regressions
                 (caught→missed) and improvements (missed→caught).
                 Exit 1 when regressions exceed --allow-regressions
                 (default 0) — useful in CI for prompt-experiment gates.
-tests/          245+ unit tests, all mock the SDK via DI. test_live.py
+tests/          258+ unit tests, all mock the SDK via DI. test_live.py
                 is gated by GADFLY_LIVE=1 and covers Haiku integration
                 for verdict, goal, and journal flows. test_watchdog_
                 corpus.py replays the curated useful-flag corpus and
                 asserts the aggregate catch rate stays above
-                GADFLY_CORPUS_THRESHOLD (default 0.70). Baselines:
-                  - claude-haiku-4-5: 18/24 = 75% (baseline_haiku.json)
-                  - claude-sonnet-4-6: 3/24 = 12.5% (baseline_sonnet.json,
-                    max_turns=6) — Sonnet is dramatically more lenient
-                    on the current rubric. It silences 17 cases Haiku
-                    catches but catches 2 that Haiku misses (case_002
-                    design-system, case_004 scope-pivot). Implication:
-                    Haiku is the model the prompt is calibrated for;
-                    swapping models requires prompt re-tuning, not
-                    just config change.
+                GADFLY_CORPUS_THRESHOLD (default 0.70).
+
+                Baselines table — recall (positive 24) × precision
+                (negative 15 silent-on-FP). F1 is the load-bearing
+                summary; recall-only without precision is misleading:
+
+                  Model              recall  precision  F1
+                  claude-haiku-4-5    75.0%   66.7%    0.71  ← prompt is calibrated for this
+                  claude-sonnet-4-6   12.5%   (n/a)     —    (max_turns=6; over-cautious)
+                  openai/gpt-5.4-nano 79.2%   26.7%    0.40  (OpenRouter, cheap, decent recall)
+                  openai/gpt-4o-mini 100.0%   13.3%    0.23  (recall-trap: flags everything)
+
+                Implication: gpt-4o-mini's 100% recall is a false
+                signal — it also flags 87% of cases where the agent's
+                pushback proved the watchdog wrong. The rubric is
+                calibrated for Haiku's interpretation; swapping models
+                requires per-model prompt re-tuning, not just config.
+
+                15+ other OR models tested at ≤$2/M blended price
+                (Kimi K2.6, GLM-5.1, DeepSeek V4 Flash, MiniMax M2.7,
+                Qwen3.6/3.5 variants, Gemma-4 26B/31B, Nemotron-3-nano,
+                Grok 4.3 / Build 0.1, Mimo V2.5 Pro, Hy3 preview,
+                Gemini 2.5 Flash Lite, gpt-oss-120b): all between 0/24
+                and 14/24 on positive corpus. Most cluster in 0-5/24
+                range — they default to "professional=true" silently.
+                Gemini 2.5 Flash Lite (14/24, 58%) is the best
+                non-OpenAI option; not benchmarked on precision.
                 The 6 missed cases are mostly STRUCTURAL gaps, not
                 prompt bugs: rationalization detection (case_010) and
                 scope-pivot detection (case_004) require journal-mode

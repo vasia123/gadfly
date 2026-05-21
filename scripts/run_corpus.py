@@ -36,7 +36,8 @@ from gadfly import session as session_mod  # noqa: E402
 from gadfly.backends import select_backend  # noqa: E402
 from gadfly.watchdog import evaluate_async, DEFAULT_MODEL  # noqa: E402
 
-CASES_FILE = ROOT / "tests" / "fixtures" / "watchdog_corpus" / "cases.json"
+DEFAULT_POSITIVE = ROOT / "tests" / "fixtures" / "watchdog_corpus" / "cases.json"
+DEFAULT_NEGATIVE = ROOT / "tests" / "fixtures" / "watchdog_corpus" / "cases_negative.json"
 
 
 def _ctx_from_dict(d: dict) -> session_mod.SessionContext:
@@ -85,7 +86,18 @@ def _short(s: str, n: int = 140) -> str:
 
 
 async def main_async(args):
-    cases = json.loads(CASES_FILE.read_text(encoding="utf-8"))
+    cases_path = Path(args.cases) if args.cases else (
+        DEFAULT_NEGATIVE if args.negative else DEFAULT_POSITIVE
+    )
+    if not cases_path.exists():
+        print(f"ERROR: cases file not found: {cases_path}", file=sys.stderr)
+        sys.exit(2)
+    cases = json.loads(cases_path.read_text(encoding="utf-8"))
+    # Auto-detect mode from first case if not forced by --negative
+    corpus_mode = (
+        "negative" if (args.negative or (cases and cases[0].get("mode") == "negative"))
+        else "positive"
+    )
     if args.only:
         cases = [c for c in cases if c["case_id"] == args.only]
         if not cases:
@@ -126,7 +138,8 @@ async def main_async(args):
         )
 
     print(f"Backend: {args.backend}  | model: {args.model}  | "
-          f"cases: {len(cases)}  | journal_mode: {bool(args.journal_mode)}")
+          f"cases: {len(cases)} ({corpus_mode})  | "
+          f"journal_mode: {bool(args.journal_mode)}")
     if args.backend == "openai_compat":
         masked = (api_key[:4] + "…") if api_key else "(none)"
         print(f"Endpoint: {args.base_url}  | api_key: {masked}")
@@ -150,8 +163,18 @@ async def main_async(args):
             results.append({"case_id": cid, "status": "error", "error": repr(exc)})
             continue
         flagged = res.verdict.professional is False
-        marker = "✓ CAUGHT" if flagged else "✗ MISSED"
-        if flagged:
+        # Positive corpus: success = model RE-FIRES the catch (flagged=True).
+        # Negative corpus: success = model STAYS SILENT (flagged=False),
+        #   matching the agent's pushback that the original flag was wrong.
+        if corpus_mode == "negative":
+            ok = (not flagged)
+            marker = "✓ SILENT" if ok else "✗ FLAGGED"
+            status = "correct_silence" if ok else "false_flag"
+        else:
+            ok = flagged
+            marker = "✓ CAUGHT" if ok else "✗ MISSED"
+            status = "caught" if ok else "missed"
+        if ok:
             n_pass += 1
         else:
             n_fail += 1
@@ -164,7 +187,7 @@ async def main_async(args):
             print(f"     ERR : {res.error}")
         results.append({
             "case_id": cid,
-            "status": "caught" if flagged else "missed",
+            "status": status,
             "verdict_professional": res.verdict.professional,
             "verdict_reason": res.verdict.reason,
             "verdict_suggestion": res.verdict.suggestion,
@@ -176,15 +199,17 @@ async def main_async(args):
     print("=" * 100)
     total_eval = n_pass + n_fail
     rate = (n_pass / total_eval * 100) if total_eval else 0.0
-    print(f"Caught: {n_pass}/{total_eval}  ({rate:.1f}%)   "
+    metric = "Correct silence" if corpus_mode == "negative" else "Caught"
+    print(f"{metric}: {n_pass}/{total_eval}  ({rate:.1f}%)   "
           f"missed: {n_fail}   errored: {n_error}")
 
     if args.out:
         out = {
             "model": args.model,
+            "mode": corpus_mode,
             "journal_mode": bool(args.journal_mode),
-            "caught": n_pass,
-            "missed": n_fail,
+            "passed": n_pass,
+            "failed": n_fail,
             "errored": n_error,
             "results": results,
         }
@@ -219,6 +244,14 @@ def main():
                         '\'{"anthropic-version":"2023-06-01"}\'.')
     p.add_argument("--only", help="Run only the case with this id")
     p.add_argument("--out", help="Write JSON report to this path")
+    p.add_argument(
+        "--negative", action="store_true",
+        help="Run negative-corpus mode: success = model stays silent "
+             "(matches the agent's pushback that the original flag was wrong). "
+             "Loads cases_negative.json by default; overridable via --cases.",
+    )
+    p.add_argument("--cases", default=None,
+                   help="Override cases file path. Default depends on --negative.")
     p.add_argument(
         "--journal-mode", action="store_true",
         help="Use SYSTEM_PROMPT_JOURNAL (default: legacy SYSTEM_PROMPT, "

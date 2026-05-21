@@ -21,6 +21,7 @@ Output: tests/fixtures/watchdog_corpus/cases.json
 
 from __future__ import annotations
 
+import argparse
 import glob
 import json
 import os
@@ -53,9 +54,16 @@ ACK_POSITIVE = re.compile(
 )
 
 
-def find_flagged_acks() -> list[dict]:
-    """Walk all audit logs, return verdict records where the agent later
-    acknowledged the flag in their next assistant message."""
+def find_flagged_acks(mode: str = "positive") -> list[dict]:
+    """Walk all audit logs, return verdict records where the agent's
+    next assistant message matched the chosen mode:
+
+      - 'positive': agent ACKNOWLEDGED the flag (watchdog was right).
+        These exercise model recall — the verdict should re-fire.
+      - 'negative': agent PUSHED BACK on the flag (watchdog was wrong).
+        These exercise model precision — verdict should stay silent
+        (professional=True).
+    """
     out: list[dict] = []
     for fp in sorted(glob.glob(LOG_GLOB)):
         flagged = []
@@ -87,7 +95,7 @@ def find_flagged_acks() -> list[dict]:
         except OSError:
             continue
         for rec in flagged:
-            ack = _find_ack(entries, rec)
+            ack = _find_ack(entries, rec, mode=mode)
             if not ack:
                 continue
             out.append({
@@ -101,7 +109,7 @@ def find_flagged_acks() -> list[dict]:
     return out
 
 
-def _find_ack(entries: list[dict], verdict_rec: dict) -> dict | None:
+def _find_ack(entries: list[dict], verdict_rec: dict, *, mode: str = "positive") -> dict | None:
     payload = verdict_rec.get("payload") or {}
     target_input = payload.get("tool_input") or {}
     target_tool = payload.get("tool_name")
@@ -166,10 +174,18 @@ def _find_ack(entries: list[dict], verdict_rec: dict) -> dict | None:
         txt = "\n".join(chunks).strip()
         if not txt:
             continue
-        if ACK_NEGATIVE.search(txt):
-            return None
-        if ACK_POSITIVE.search(txt):
-            ack_text = txt
+        if mode == "positive":
+            if ACK_NEGATIVE.search(txt):
+                return None
+            if ACK_POSITIVE.search(txt):
+                ack_text = txt
+        else:  # negative — agent pushed back, watchdog was wrong
+            if ACK_POSITIVE.search(txt):
+                # The agent agreed with the flag; this is a TRUE positive,
+                # not a false one. Reject.
+                return None
+            if ACK_NEGATIVE.search(txt):
+                ack_text = txt
         break
     if ack_text is None:
         return None
@@ -204,7 +220,7 @@ def _serialize_context(ctx) -> dict:
     }
 
 
-def extract_case(cand: dict, idx: int) -> dict | None:
+def extract_case(cand: dict, idx: int, *, mode: str = "positive") -> dict | None:
     rec = cand["verdict_rec"]
     payload = rec.get("payload") or {}
     entries = cand["entries"]
@@ -234,10 +250,13 @@ def extract_case(cand: dict, idx: int) -> dict | None:
         "tool_input": payload.get("tool_input") or {},
         "tool_response": payload.get("tool_response"),
         "expected": {
-            "professional": False,
+            # positive corpus: watchdog was right, model SHOULD flag.
+            # negative corpus: watchdog was wrong, model SHOULD stay silent.
+            "professional": (True if mode == "negative" else False),
             "original_reason": verdict.get("reason", ""),
             "original_suggestion": verdict.get("suggestion", ""),
         },
+        "mode": mode,
         "ack_excerpt": cand["ack_excerpt"],
         "session_context": _serialize_context(ctx),
     }
@@ -245,14 +264,25 @@ def extract_case(cand: dict, idx: int) -> dict | None:
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=("positive", "negative"),
+                    default="positive",
+                    help="positive: agent acked the flag (corpus for recall). "
+                         "negative: agent pushed back (corpus for precision).")
+    ap.add_argument("--out", default=None,
+                    help="Output filename inside the fixtures dir. "
+                         "Default: cases.json (positive) / "
+                         "cases_negative.json (negative).")
+    args = ap.parse_args()
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    cands = find_flagged_acks()
-    print(f"Found {len(cands)} ack candidates after transcript walk")
+    cands = find_flagged_acks(mode=args.mode)
+    print(f"Found {len(cands)} {args.mode} candidates after transcript walk")
 
     cases = []
     for i, c in enumerate(cands):
         try:
-            case = extract_case(c, i)
+            case = extract_case(c, i, mode=args.mode)
         except Exception as exc:
             print(f"  [{i}] FAILED to extract: {exc!r}")
             continue
@@ -263,7 +293,10 @@ def main():
               f"snapshots={len(case['session_context']['per_file_snapshots'])} "
               f"actions={len(case['session_context']['recent_actions'])}")
 
-    out_file = OUT_DIR / "cases.json"
+    out_name = args.out or (
+        "cases.json" if args.mode == "positive" else "cases_negative.json"
+    )
+    out_file = OUT_DIR / out_name
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump(cases, f, indent=2, ensure_ascii=False)
     print(f"\nWrote {len(cases)} cases → {out_file}")
