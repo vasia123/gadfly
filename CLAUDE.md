@@ -146,11 +146,13 @@ tests/          258+ unit tests, all mock the SDK via DI. test_live.py
                 (negative 15 silent-on-FP). F1 is the load-bearing
                 summary; recall-only without precision is misleading:
 
-                  Model              recall  precision  F1
-                  claude-haiku-4-5    75.0%   66.7%    0.71  ← prompt is calibrated for this
-                  claude-sonnet-4-6   12.5%   (n/a)     —    (max_turns=6; over-cautious)
-                  openai/gpt-5.4-nano 79.2%   26.7%    0.40  (OpenRouter, cheap, decent recall)
-                  openai/gpt-4o-mini 100.0%   13.3%    0.23  (recall-trap: flags everything)
+                  Model                       recall  precision  F1
+                  claude-haiku-4-5             75.0%   66.7%    0.71  ← rubric calibrated for this
+                  google/gemini-3.1-flash-lite-preview
+                                               62.5%   73.3%    0.68  ← only credible alt; 4× cheaper
+                  claude-sonnet-4-6            12.5%   (n/a)     —    (max_turns=6; over-cautious)
+                  openai/gpt-5.4-nano          79.2%   26.7%    0.40  (recall ↑ but precision-poor)
+                  openai/gpt-4o-mini          100.0%   13.3%    0.24  (recall trap: flags everything)
 
                 Implication: gpt-4o-mini's 100% recall is a false
                 signal — it also flags 87% of cases where the agent's
