@@ -149,10 +149,12 @@ tests/          258+ unit tests, all mock the SDK via DI. test_live.py
                   Model                       recall  precision  F1
                   claude-haiku-4-5             75.0%   66.7%    0.71  ← rubric calibrated for this
                   google/gemini-3.1-flash-lite-preview
-                                               62.5%   73.3%    0.68  ← only credible alt; 4× cheaper
-                  claude-sonnet-4-6            12.5%   (n/a)     —    (max_turns=6; over-cautious)
-                  openai/gpt-5.4-nano          79.2%   26.7%    0.40  (recall ↑ but precision-poor)
-                  openai/gpt-4o-mini          100.0%   13.3%    0.24  (recall trap: flags everything)
+                                               62.5%   73.3%    0.68  ← 4× cheaper than Haiku
+                  mistralai/mistral-small-2603 79.2%   53.3%    0.64  ← 6× cheaper; best price/F1
+                  openai/gpt-5.4-nano          79.2%   26.7%    0.40  (precision-poor at this tier)
+                  openai/gpt-4o-mini          100.0%   13.3%    0.24  (recall trap)
+                  inclusionai/ling-2.6-1t      79.2%    6.7%    0.12  (worse recall trap)
+                  claude-sonnet-4-6            12.5%   (n/a)     —    (over-cautious)
 
                 Implication: gpt-4o-mini's 100% recall is a false
                 signal — it also flags 87% of cases where the agent's
@@ -160,15 +162,15 @@ tests/          258+ unit tests, all mock the SDK via DI. test_live.py
                 calibrated for Haiku's interpretation; swapping models
                 requires per-model prompt re-tuning, not just config.
 
-                15+ other OR models tested at ≤$2/M blended price
-                (Kimi K2.6, GLM-5.1, DeepSeek V4 Flash, MiniMax M2.7,
-                Qwen3.6/3.5 variants, Gemma-4 26B/31B, Nemotron-3-nano,
-                Grok 4.3 / Build 0.1, Mimo V2.5 Pro, Hy3 preview,
-                Gemini 2.5 Flash Lite, gpt-oss-120b): all between 0/24
-                and 14/24 on positive corpus. Most cluster in 0-5/24
-                range — they default to "professional=true" silently.
-                Gemini 2.5 Flash Lite (14/24, 58%) is the best
-                non-OpenAI option; not benchmarked on precision.
+                40 models total tested. See docs/model_comparison.md
+                for the full table + cost column. Beyond the F1-tested
+                head, the long tail clusters at 0-5/24 — most models
+                default to "professional=true" silently. Strong coding
+                leaderboard names (Kimi K2.6, DeepSeek V4 Pro, GLM-5.1,
+                gpt-5.1-codex-mini, gpt-oss-120b, Nvidia Nemotron-3
+                Super 120B) all score 0/24 — they're trained to be
+                helpful/agreeable, not adversarial. The bottleneck
+                is *willingness to disagree*, not raw capability.
                 The 6 missed cases are mostly STRUCTURAL gaps, not
                 prompt bugs: rationalization detection (case_010) and
                 scope-pivot detection (case_004) require journal-mode
