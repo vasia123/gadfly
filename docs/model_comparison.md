@@ -35,9 +35,22 @@ Backend: `claude_sdk` for Anthropic models (subscription billing),
 
 ## Results
 
-Sorted by F1 (when measured), then by recall. Precision tested only
-for models that crossed ~50% recall — others would dominate the
-precision discussion with their silent-default behaviour.
+Two modes evaluated for each model:
+
+  - **tool-call**: forced `tool_choice={function:submit_verdict}` via
+    OpenAICompatBackend.
+  - **JSON**: `response_format={type:json_object}` plus a prompt
+    suffix asking for English JSON, via OpenAIJsonBackend.
+
+The mode matters a lot — many models are dramatically more useful in
+one or the other. The table below shows tool-call results (the
+original baseline); the JSON section below it lists where JSON beat
+or matched tool-call. Sorted by F1 (when measured), then by recall.
+Precision tested only for models that crossed ~50% recall — others
+would dominate the precision discussion with their silent-default
+behaviour.
+
+### Tool-call mode
 
 | # | Model | Recall (24) | Precision (15) | F1 | $/M in/out |
 |---|---|---|---|---|---|
@@ -86,6 +99,47 @@ precision discussion with their silent-default behaviour.
 | 32 | bytedance-seed/seed-2.0-mini | 0.0% | — | — | $0.10 / $0.40 |
 | 32 | baidu/cobuddy:free | 0.0% | — | — | free |
 | 32 | devstral-small-latest | 0.0% | — | — | $0.10 / $0.30 (Mistral native) |
+
+### JSON-mode results
+
+All 40 models above re-tested with `response_format=json_object`. The
+mode shifts the leaderboard dramatically — 23 of 40 improved, 5
+regressed, the rest unchanged. Models that benefited most: open-weight
+families (Qwen, Ling, Minimax, DeepSeek) where forced tool-calling
+seemed to drag them into trigger-happy mode; in JSON they relax
+toward default-silent except where the rubric truly fires.
+
+Mistral's lineage is the explicit exception: `mistral-small-latest`
+drops from F1 0.64 → 0.15 in JSON, `codestral-latest` 0.61 → 0.46.
+For Mistral, the forced tool-call is the calibration crutch.
+
+Top 5 by JSON-mode recall (tested for precision too):
+
+| Model | R (JSON) | P (JSON) | F1 (JSON) | F1 (tool-call) | $/M in/out |
+|---|---|---|---|---|---|
+| **inclusionai/ling-2.6-1t** ⭐ | 70.8% | **86.7%** | **0.78** | 0.12 | $0.08 / $0.63 |
+| **google/gemini-3.1-flash-lite-preview** | 70.8% | 73.3% | **0.72** | 0.68 | $0.25 / $1.50 |
+| google/gemini-3.1-flash-lite (non-preview) | 66.7% | 66.7% | 0.67 | — | $0.25 / $1.50 |
+| openai/gpt-5.4-nano | 83.3% | 20.0% | 0.32 | 0.40 | $0.20 / $1.25 |
+| openai/gpt-4o-mini | 100.0% | 6.7% | 0.12 | 0.24 | $0.75 / $3.00 |
+
+Bottom line: **`inclusionai/ling-2.6-1t` in JSON mode is the best
+overall** — F1 0.78 beats Haiku's 0.71 at 1/13 the price. The model
+needs the JSON-mode language guard (`reason` and `suggestion` must be
+in English) because it occasionally drifts into Chinese on Russian
+projects; the prompt-level constraint shut that down cleanly in
+production smoke tests.
+
+Other notable JSON-mode movers (positive corpus recall, no precision
+data — flagged here so you know to test precision before adopting):
+
+| Model | tool-call R | JSON R | Δ | $/M in/out |
+|---|---|---|---|---|
+| qwen/qwen3-235b-a22b-2507 | 20.8% | 54.2% | +33.3 | — |
+| inclusionai/ling-2.6-flash | 20.8% | 54.2% | +33.3 | $0.01 / $0.03 |
+| devstral-small-latest | 0.0% | 29.2% | +29.2 | $0.10 / $0.30 |
+| minimax/minimax-m2.7 | 4.2% | 33.3% | +29.2 | $0.28 / $1.20 |
+| qwen/qwen3-coder-next | 20.8% | 45.8% | +25.0 | — |
 
 ## Conclusions
 

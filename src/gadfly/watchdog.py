@@ -69,7 +69,7 @@ def _default_backend_from_env() -> Backend | None:
     is incomplete or unset — caller then falls back to ClaudeSDKBackend.
     """
     name = os.environ.get("GADFLY_BACKEND", "").strip()
-    if name != "openai_compat":
+    if name not in ("openai_compat", "openai_json"):
         return None
     base_url = os.environ.get("GADFLY_BASE_URL", "").strip()
     if not base_url:
@@ -86,6 +86,11 @@ def _default_backend_from_env() -> Backend | None:
                 extra = parsed
         except Exception:
             extra = None
+    if name == "openai_json":
+        from .backends.openai_json import OpenAIJsonBackend
+        return OpenAIJsonBackend(
+            base_url=base_url, api_key=api_key, extra_headers=extra
+        )
     from .backends.openai_compat import OpenAICompatBackend
     return OpenAICompatBackend(
         base_url=base_url, api_key=api_key, extra_headers=extra

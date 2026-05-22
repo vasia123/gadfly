@@ -111,7 +111,7 @@ async def main_async(args):
         os.environ["GADFLY_JOURNAL_VERDICT"] = "0"
 
     backend = None
-    if args.backend == "openai_compat":
+    if args.backend in ("openai_compat", "openai_json"):
         api_key = ""
         if args.api_key_env and args.api_key_env != "NONE":
             api_key = os.environ.get(args.api_key_env, "")
@@ -119,7 +119,7 @@ async def main_async(args):
                 print(f"WARNING: env var {args.api_key_env} is empty",
                       file=sys.stderr)
         if not args.base_url:
-            print("ERROR: --base-url is required for --backend openai_compat",
+            print(f"ERROR: --base-url is required for --backend {args.backend}",
                   file=sys.stderr)
             sys.exit(2)
         extra: dict[str, str] = {}
@@ -131,7 +131,7 @@ async def main_async(args):
                       file=sys.stderr)
                 sys.exit(2)
         backend = select_backend(
-            "openai_compat",
+            args.backend,
             base_url=args.base_url,
             api_key=api_key,
             extra_headers=extra or None,
@@ -140,7 +140,7 @@ async def main_async(args):
     print(f"Backend: {args.backend}  | model: {args.model}  | "
           f"cases: {len(cases)} ({corpus_mode})  | "
           f"journal_mode: {bool(args.journal_mode)}")
-    if args.backend == "openai_compat":
+    if args.backend in ("openai_compat", "openai_json"):
         masked = (api_key[:4] + "…") if api_key else "(none)"
         print(f"Endpoint: {args.base_url}  | api_key: {masked}")
     print(f"Timeout: {args.timeout}s per case")
@@ -227,9 +227,12 @@ def main():
                    help="SDK max_turns. Haiku needs 2; Sonnet/Opus often "
                         "need 4+. Default 4 works across models. "
                         "Ignored for --backend openai_compat.")
-    p.add_argument("--backend", choices=("claude_sdk", "openai_compat"),
+    p.add_argument("--backend",
+                   choices=("claude_sdk", "openai_compat", "openai_json"),
                    default="claude_sdk",
-                   help="Backend transport. Default: claude_sdk (subscription).")
+                   help="Backend transport. Default: claude_sdk (subscription). "
+                        "openai_compat — forced tool-call. "
+                        "openai_json — response_format=json_object (experimental).")
     p.add_argument("--base-url", default=None,
                    help="Required for --backend openai_compat. "
                         "Examples: https://api.openai.com/v1, "

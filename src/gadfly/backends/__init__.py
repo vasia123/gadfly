@@ -17,6 +17,7 @@ from typing import Any
 from .base import Backend, BackendResult
 from .claude_sdk import ClaudeSDKBackend
 from .openai_compat import OpenAICompatBackend
+from .openai_json import OpenAIJsonBackend
 
 
 def select_backend(name: str, **kwargs: Any) -> Backend:
@@ -25,6 +26,8 @@ def select_backend(name: str, **kwargs: Any) -> Backend:
         return ClaudeSDKBackend(**kwargs)
     if name == "openai_compat":
         return OpenAICompatBackend(**kwargs)
+    if name == "openai_json":
+        return OpenAIJsonBackend(**kwargs)
     raise ValueError(f"unknown backend: {name!r}")
 
 
@@ -33,5 +36,6 @@ __all__ = [
     "BackendResult",
     "ClaudeSDKBackend",
     "OpenAICompatBackend",
+    "OpenAIJsonBackend",
     "select_backend",
 ]

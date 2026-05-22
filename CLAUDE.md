@@ -94,16 +94,28 @@ src/gadfly/
                    env={"GADFLY_INTERNAL":"1"}). Default backend.
     openai_compat.py  OpenAICompatBackend — stdlib urllib client
                    speaking the OpenAI Chat Completions wire protocol.
+                   Forces a tool-call via tool_choice={function:...}.
                    Works against OpenAI, Anthropic's OAI-compat
                    endpoint, OpenRouter, vLLM, llama.cpp, Ollama,
-                   Groq, Together, and any self-hosted endpoint.
-                   No new deps. Forced tool-choice guarantees
-                   structured output.
+                   Groq, Together, Mistral, and any self-hosted
+                   endpoint. No new deps.
+    openai_json.py  OpenAIJsonBackend — same wire as openai_compat
+                   but uses response_format={"type":"json_object"}
+                   instead of tools+tool_choice. Appends an "output
+                   format" suffix to the user message (including a
+                   "respond in English" guard against language drift).
+                   For many open models this dramatically improves F1
+                   (ling-2.6-1t: 0.12 → 0.78). Mistral models
+                   regress in JSON mode — they're the exception.
+                   See docs/model_comparison.md.
     __init__.py    select_backend(name, **kwargs) factory.
                 Pass `backend=` to evaluate_async/evaluate to swap
-                transports; run_corpus.py exposes `--backend`,
-                `--base-url`, `--api-key-env`, `--extra-headers`.
-                Hook stays on claude_sdk for subscription billing.
+                transports; run_corpus.py exposes `--backend`
+                {claude_sdk,openai_compat,openai_json}, `--base-url`,
+                `--api-key-env`, `--extra-headers`. Production hook
+                resolves backend+model from .env env vars
+                (`GADFLY_BACKEND`, `GADFLY_BASE_URL`, `GADFLY_MODEL`,
+                `GADFLY_API_KEY_ENV`, `GADFLY_EXTRA_HEADERS`).
 scripts/
   probe.py      Live regression probe against real Haiku (no mocks;
                 bills the real subscription). CASES A/B exercise the
@@ -318,35 +330,54 @@ Default: ON. `GADFLY_HISTORIAN_PRIORS=0` rolls back.
 
 These are the load-bearing decisions. Don't undo them without reading why.
 
-### 1. Backend is env-selectable; production currently points at Mistral Small 4 via OpenRouter
+### 1. Backend is env-selectable; production currently points at Ling-2.6-1T via OpenRouter in JSON mode
 
-Two production paths supported (both implemented as `Backend`s in
-`src/gadfly/backends/`):
+Three backends shipped (all in `src/gadfly/backends/`):
 
   - `claude_sdk` — wraps claude-agent-sdk + the user's Claude Code CLI
     subscription. Cold start ~10-20s; subscription billing.
   - `openai_compat` — stdlib `urllib.request` against any
-    /v1/chat/completions endpoint. ~3-5s latency.
+    /v1/chat/completions endpoint with FORCED TOOL-CALL
+    (`tool_choice={function:submit_verdict}`). ~3-5s latency.
+  - `openai_json` — same wire, but `response_format={type:json_object}`
+    + an "output format" prompt suffix. The model returns JSON
+    directly. ~2-3s latency. Avoids "model did not call submit_verdict"
+    failures; some models score dramatically higher in this mode
+    (see docs/model_comparison.md — ling-2.6-1t jumps from F1 0.12
+    in tool-call to 0.78 in JSON).
 
 The hook reads `<gadfly_repo>/.env` at startup (see `_load_env_file_once`
 in hook.py) and the watchdog then resolves the backend + model from
 these env vars:
 
-    GADFLY_BACKEND       = "openai_compat" | "claude_sdk" (default fallback)
-    GADFLY_BASE_URL      = https://api.mistral.ai/v1
-    GADFLY_API_KEY_ENV   = MISTRAL_API_KEY (name of the env var holding the key)
-    GADFLY_MODEL         = mistral-small-latest
+    GADFLY_BACKEND       = "openai_json" | "openai_compat" | "claude_sdk"
+    GADFLY_BASE_URL      = https://openrouter.ai/api/v1
+    GADFLY_API_KEY_ENV   = OPENROUTER_API_KEY (name of the env var with the key)
+    GADFLY_MODEL         = inclusionai/ling-2.6-1t
     GADFLY_EXTRA_HEADERS = optional JSON (e.g. anthropic-version)
 
-Current production .env values (NOT committed): mistral-small-latest
-via Mistral's native API at $0.10/$0.30 per M tokens. Validation:
-F1 0.64 in docs/model_comparison.md, 10× cheaper than Haiku via OR,
-no middleman fee, latency p50 ~2.3s. Previously used OpenRouter
-which charges a 5.5% credit-purchase fee — switched to direct
-Mistral API once the user signed up at console.mistral.ai.
+Current production: inclusionai/ling-2.6-1t in openai_json mode.
+F1 0.78 (recall 70.8%, precision 86.7%) — highest of all 40 models
+tested. Price: $0.075/$0.625 per M tokens via OpenRouter.
 
-Roll back to subscription-billed Haiku by removing the GADFLY_* lines
-from .env (they fall through to ClaudeSDKBackend + claude-haiku-4-5).
+Language-leakage guard: the JSON-mode instruction explicitly requires
+`reason` and `suggestion` in English. Ling occasionally drifted into
+Chinese during corpus replay (it's an inclusionAI / Ant Group model);
+the prompt-level constraint shut that down cleanly. If the leakage
+ever returns, tighten `_JSON_INSTRUCTION` in
+`src/gadfly/backends/openai_json.py`.
+
+History:
+  - Original prod: claude-haiku-4-5 via subscription, F1 0.71.
+  - 1st migration: mistral-small-2603 via OpenRouter (openai_compat,
+    tool-call), F1 0.64. Switched to save subscription quota.
+  - 2nd migration: mistral-small-latest via Mistral native API.
+    Avoided OR's 5.5% credit-purchase fee. Same F1.
+  - Current: ling-2.6-1t via OpenRouter (openai_json). F1 jump from
+    0.64 to 0.78, lower price than Mistral, but tied to OR again.
+
+Roll back to subscription Haiku by removing the GADFLY_* lines from
+.env (they fall through to ClaudeSDKBackend + claude-haiku-4-5).
 
 **Test-isolation pitfall:** `_load_env_file_once` is called inside
 `main()`, not at module import. Otherwise `tests/test_hook.py`'s import
