@@ -141,6 +141,23 @@ data — flagged here so you know to test precision before adopting):
 | minimax/minimax-m2.7 | 4.2% | 33.3% | +29.2 | $0.28 / $1.20 |
 | qwen/qwen3-coder-next | 20.8% | 45.8% | +25.0 | — |
 
+### Recently-added OR models tested in JSON mode
+
+Free-tier models reached via OpenRouter have **non-deterministic
+routing** — repeated runs of the same model can land on different
+provider replicas that don't honour `temperature=0`. The numbers
+below are single-run baselines; expect ±10pp variance:
+
+| Model | JSON R | $/M in/out | comment |
+|---|---|---|---|
+| poolside/laguna-xs.2:free | 37.5% | free | best of the 4 new |
+| nvidia/nemotron-3-nano-omni-reasoning:free | 8.3% | free | reasoning variant |
+| openrouter/owl-alpha | 8.3% | free | OR's experimental |
+| poolside/laguna-m.1:free | 8.3% | free | medium Poolside |
+
+None match Ling-2.6-1T's F1 0.78. Recorded for future regression
+tracking only.
+
 ## Conclusions
 
 1. **Haiku owns the F1 podium (0.71).** Sweet spot of recall (75%)
