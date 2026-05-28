@@ -141,6 +141,24 @@ data — flagged here so you know to test precision before adopting):
 | minimax/minimax-m2.7 | 4.2% | 33.3% | +29.2 | $0.28 / $1.20 |
 | qwen/qwen3-coder-next | 20.8% | 45.8% | +25.0 | — |
 
+### High-precision / low-recall JSON-mode models (full F1 measured)
+
+These three were re-tested in JSON mode with **both** corpora. All share
+the same failure mode: very high precision (they rarely false-flag) but
+they default to `professional=true` and miss most real problems. Bigger
+reasoning models are *worse*, not better — deepseek-v4-pro (a reasoning
+model) under-catches its own flash sibling. Confirms the corpus thesis:
+the bottleneck is *willingness to disagree*, not capability.
+
+| Model | JSON R | JSON P | F1 | tool-call R | $/M in/out |
+|---|---|---|---|---|---|
+| deepseek/deepseek-v4-flash | 33.3% | 86.7% | 0.48 | 12.5% | $0.11 / $0.22 |
+| xiaomi/mimo-v2.5 | 20.8% | 86.7% | 0.34 | — | — |
+| deepseek/deepseek-v4-pro | 16.7% | 93.3% | 0.28 | 0.0% | $0.44 / $0.87 |
+
+JSON mode roughly doubled recall for both deepseek variants vs tool-call,
+but none come close to Ling's F1 0.78. Recorded for regression tracking.
+
 ### Recently-added OR models tested in JSON mode
 
 Free-tier models reached via OpenRouter have **non-deterministic
