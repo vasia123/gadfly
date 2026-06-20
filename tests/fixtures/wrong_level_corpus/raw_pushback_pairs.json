@@ -1,0 +1,562 @@
+[
+  {
+    "msg_id": 6,
+    "ts": "2026-06-16T12:45:30.727Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.75,
+    "user_quote": "слишком мало эффектов. зачем вообще ограничивать эффекты по названию? почему бы не поддерживать произвольные эффекты и пусть llm определяет что это за эффект",
+    "why_this_action": "Agent just edited mutator.go and hazardEffects map — the targeted effect catalog change"
+  },
+  {
+    "msg_id": 8,
+    "ts": "2026-06-16T13:34:38.704Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "hardcoded-instance",
+    "confidence": 0.9,
+    "user_quote": "я правильно понял что ты напрямую в промпт зашил тест и сделал костыль?",
+    "why_this_action": "The Edit at index 2 is the prompt patch that hardcoded the test phrasing"
+  },
+  {
+    "msg_id": 9,
+    "ts": "2026-06-16T13:35:35.230Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "нужен более железный подход. либо делаем по методу энштейна и переходим на другой уровень",
+    "why_this_action": "Same Edit chain inside intent_parser.go — user reads the bolt-on prompt rules and pushes back"
+  },
+  {
+    "msg_id": 10,
+    "ts": "2026-06-16T13:55:52.440Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.8,
+    "user_quote": "это точно профессиональное решение?",
+    "why_this_action": "Agent's last step rewrote computeThingEffect with stem-match aliases — user questions the approach"
+  },
+  {
+    "msg_id": 11,
+    "ts": "2026-06-16T14:17:42.447Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "текущий баг может быть багом более высокого порядка - неправильной организацией выбора поведения нпс?",
+    "why_this_action": "Agent just Edited applyEnvironmentalHazards — user questions whether the localized fix is at the wrong level"
+  },
+  {
+    "msg_id": 22,
+    "ts": "2026-06-17T07:38:32.973Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.9,
+    "user_quote": "чето както тупо ты подошел к решению этого вопроса... думай глубже над проблемой",
+    "why_this_action": "Agent presented binary choice via AskUserQuestion — user rejects shallow framing"
+  },
+  {
+    "msg_id": 23,
+    "ts": "2026-06-17T08:10:15.671Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 1,
+    "category": "hardcoded-instance",
+    "confidence": 0.95,
+    "user_quote": "что это набор костылей в промте backend/internal/application/extraction/intent_parser.go? зачем мы перегружаем небольшую модельку таким количеством костылей?",
+    "why_this_action": "Edit to intent_parser.go's prompt happened earlier; user just opened the file and read the result"
+  },
+  {
+    "msg_id": 38,
+    "ts": "2026-06-17T12:20:19.617Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 3,
+    "category": "hardcoded-instance",
+    "confidence": 0.95,
+    "user_quote": "я правильно понимаю что ты закостылил всё под огонь и другие варианты спасения при падении не предусмотрены?",
+    "why_this_action": "The git commit (index 3) implements rescue mechanic that's fire-specific; user reads commit message"
+  },
+  {
+    "msg_id": 39,
+    "ts": "2026-06-17T12:25:05.650Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.98,
+    "user_quote": "ты постоянно пытаешься скатиться в локальный фикс вместо того чтобы обобщить на другие ситуации... рассматривать минимум на трех уровнях вверх по абстракции",
+    "why_this_action": "Same commit chain — user crystallises the three-levels-up rule after seeing it"
+  },
+  {
+    "msg_id": 42,
+    "ts": "2026-06-17T12:44:54.840Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.8,
+    "user_quote": "это тоже должно решаться уровнем выше. т.е. похоже что на вход нейронке идет плохой промпт",
+    "why_this_action": "After agent's CLAUDE.md tweak, user re-frames the narrator-name-drop bug at a higher level"
+  },
+  {
+    "msg_id": 51,
+    "ts": "2026-06-17T15:25:29.341Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.95,
+    "user_quote": "разве это TickProcessor должен начислять урон? почему вообще там константа оказалась? это точно профессионально?",
+    "why_this_action": "Agent just summarized fireHeatPerHP defense — user pushes back on architectural placement"
+  },
+  {
+    "msg_id": 55,
+    "ts": "2026-06-17T17:37:24.967Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "у тебя бинарный маркер разрушенности? это профессионально?",
+    "why_this_action": "Agent's summary covers the boolean StateDestroyed flag — user questions the discrete representation"
+  },
+  {
+    "msg_id": 59,
+    "ts": "2026-06-17T18:55:59.636Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "hardcoded-instance",
+    "confidence": 0.95,
+    "user_quote": "я правильно понимаю что ты наплодил костылей относящихся к одному конкретному приключению?",
+    "why_this_action": "The Edit at index 2 hardcodes 'Заброшенный двор' specific content per kind — exactly what user calls out"
+  },
+  {
+    "msg_id": 60,
+    "ts": "2026-06-17T19:09:55.327Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "rationalization",
+    "confidence": 0.85,
+    "user_quote": "я по-прежнему не вижу чтобы ты продумал до нужного слоя. только оправдания",
+    "why_this_action": "Agent's grep+read just before — explanation/justification, not deeper work"
+  },
+  {
+    "msg_id": 62,
+    "ts": "2026-06-17T20:17:38.146Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.75,
+    "user_quote": "продолжай, только без костылей",
+    "why_this_action": "Agent committed 'тонкий костыль' rework — user reinforces the boundary going forward"
+  },
+  {
+    "msg_id": 65,
+    "ts": "2026-06-17T21:20:13.373Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 1,
+    "category": "wrong-level",
+    "confidence": 0.95,
+    "user_quote": "какое у нас правило насчет нечеткого контента? использовать ллм. почему ты используешь костыли вместо этого?",
+    "why_this_action": "The CueCovered function in rutext.go (index 1) is the determ word-matching kostyl the user is angry about"
+  },
+  {
+    "msg_id": 75,
+    "ts": "2026-06-18T08:15:09.551Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 1,
+    "category": "hardcoded-instance",
+    "confidence": 0.95,
+    "user_quote": "не понял. ты закостылил ровно три действия?",
+    "why_this_action": "Index 1 Edit is the Parse() rewrite that hardcodes a 3-action limit"
+  },
+  {
+    "msg_id": 78,
+    "ts": "2026-06-18T09:06:21.012Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 3,
+    "category": "hardcoded-instance",
+    "confidence": 0.8,
+    "user_quote": "не понял. почему ты ожидаешь один удар когда ударов было три?",
+    "why_this_action": "Agent's bash 'ожидаю ровно 1 удар после схлопа' — collapses to single action; user questions the model"
+  },
+  {
+    "msg_id": 79,
+    "ts": "2026-06-18T09:13:30.641Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 3,
+    "category": "wrong-level",
+    "confidence": 0.95,
+    "user_quote": "делаем по методу энштейна. думаем на каком уровне это чинится в первую очередь. моя мысль в том что нужно выстраивать отношения между сущностями",
+    "why_this_action": "Agent diagnosed three-fold issue at index 3 and proposed local fix — user redirects to higher abstraction"
+  },
+  {
+    "msg_id": 82,
+    "ts": "2026-06-18T09:40:53.433Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.9,
+    "user_quote": "«пока не упадёт/взмолится» - ты снова пихаешь костыли?",
+    "why_this_action": "Last Edit (index 4) added 'падает/взмолится' to the revision checklist — user spotted the specific hardcoded condition"
+  },
+  {
+    "msg_id": 83,
+    "ts": "2026-06-18T09:56:37.983Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 1,
+    "category": "wrong-level",
+    "confidence": 0.95,
+    "user_quote": "если ты полностью скормишь первый промпт то роль из первого промпта протечет во второй. что за наивный подход? ты вообще не похож на профессионала сейчас!",
+    "why_this_action": "Index 1 Edit set up the two-pass scheme with first prompt full-feed — exact target"
+  },
+  {
+    "msg_id": 93,
+    "ts": "2026-06-18T10:54:25.744Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 0,
+    "category": "wrong-level",
+    "confidence": 0.9,
+    "user_quote": "а почему модель вообще способна в json пихать английский? мы же это должны фиксить на уровне грамматики?",
+    "why_this_action": "Write at index 0 created parsebench main.go that doesn't grammar-constrain — user spots the missed level"
+  },
+  {
+    "msg_id": 103,
+    "ts": "2026-06-18T12:13:34.487Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "звучит как костыль",
+    "why_this_action": "emptyFillers normalization map (index 2) is the post-hoc string fix the user calls костыль"
+  },
+  {
+    "msg_id": 127,
+    "ts": "2026-06-18T14:08:50.785Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 0,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "условия и прочее - это отдельные слои и не должны быть разобраны в этом слое. давай думать по методу энштейна на каких слоях нам это всё отлавливать",
+    "why_this_action": "Index 0 segDeedPrompt edit folds conditions inline — exactly the layer-mixing user calls out"
+  },
+  {
+    "msg_id": 147,
+    "ts": "2026-06-18T16:35:00.545Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 0,
+    "category": "rationalization",
+    "confidence": 0.75,
+    "user_quote": "поправь CLAUDE.md чтобы подобных грехов больше не было",
+    "why_this_action": "Agent's analysis at index 0 admitted prompt opираlся on leaked tokens — user codifies the lesson"
+  },
+  {
+    "msg_id": 165,
+    "ts": "2026-06-19T05:45:49.634Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.95,
+    "user_quote": "тут надо не костыли пихать а подняться на уровень выше",
+    "why_this_action": "Index 2 Edit was the cue_classifier rule injection that didn't work; user explicitly redirects up"
+  },
+  {
+    "msg_id": 169,
+    "ts": "2026-06-19T07:55:23.036Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "recon-as-work",
+    "confidence": 0.75,
+    "user_quote": "сначала оценка методом энштейна - нужен ли нам этот промпт или нет. не покрывают ли его другие слои?",
+    "why_this_action": "Agent's prompt inventory summary — user pushes back asking for higher-level evaluation first"
+  },
+  {
+    "msg_id": 175,
+    "ts": "2026-06-19T09:21:15.809Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 1,
+    "category": "hardcoded-instance",
+    "confidence": 0.8,
+    "user_quote": "стоп. что за mayHaveModality?",
+    "why_this_action": "Index 1 Edit to mayHaveModality — the deterministic Russian-word gate the user is questioning"
+  },
+  {
+    "msg_id": 176,
+    "ts": "2026-06-19T09:21:56.422Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 0,
+    "category": "hardcoded-instance",
+    "confidence": 0.95,
+    "user_quote": "тоесть это костыль привязанный к русским словам?",
+    "why_this_action": "Index 0 was the Edit to mayHaveModality — Russian-word marker list"
+  },
+  {
+    "msg_id": 177,
+    "ts": "2026-06-19T09:24:06.004Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 0,
+    "category": "hardcoded-instance",
+    "confidence": 0.85,
+    "user_quote": "пиши в CLAUDE.md новое правило - костыли наподобие этого(привязка к русским или любым другим словам) - запрещены",
+    "why_this_action": "Same mayHaveModality target as msg 176 — user codifies the rule"
+  },
+  {
+    "msg_id": 180,
+    "ts": "2026-06-19T09:45:42.325Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 0,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "нет. смешивать слои плохо",
+    "why_this_action": "Commit at index 0 fuses gate removal with CLAUDE.md rule — user objects to mixing layers"
+  },
+  {
+    "msg_id": 188,
+    "ts": "2026-06-19T12:21:47.385Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.8,
+    "user_quote": "это точно профессиональное решение? что вообще находится в Mentions? текст или айдишники?",
+    "why_this_action": "Index 2 summary of the increment plan — user questions semantic correctness of the data type"
+  },
+  {
+    "msg_id": 192,
+    "ts": "2026-06-19T13:32:47.386Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "половина успеха правильного матчинга сущностей - правильно подтянуть сущности из воспоминаний... нужно этот момент доработать методом энштейна",
+    "why_this_action": "Agent's bash probe at index 4 found the symptom — user redirects to upstream entity scope"
+  },
+  {
+    "msg_id": 196,
+    "ts": "2026-06-19T22:01:01.037Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "other",
+    "confidence": 0.7,
+    "user_quote": "какая еще ветка? кто разрешал? работаем в мейне!",
+    "why_this_action": "Agent committed to feat/entity-matching-rework branch (index 2) — user calls out procedural rule break"
+  },
+  {
+    "msg_id": 202,
+    "ts": "2026-06-20T07:04:38.888Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 2,
+    "category": "recon-as-work",
+    "confidence": 0.95,
+    "user_quote": "вместо правильного большого цикла ты нарушил CLAUDE.md и сделал отписку вместо реализации",
+    "why_this_action": "Agent's 'разведка I-цикла' commit + summary (index 2) is the recon-as-work — user calls it отписка"
+  },
+  {
+    "msg_id": 215,
+    "ts": "2026-06-20T09:10:37.199Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 4,
+    "category": "stub-incomplete",
+    "confidence": 0.7,
+    "user_quote": "нам нельзя терять шероховатости чтобы потом их можно было поправить. где это лучше делать - в коде или создать TODO.md",
+    "why_this_action": "Agent's summary closed P0.1 stage 1 — user warns roughness should be tracked before being lost"
+  },
+  {
+    "msg_id": 231,
+    "ts": "2026-06-20T14:51:18.791Z",
+    "file": "b3757c8f-5123-4dfb-b2cb-253c87ad162e.jsonl",
+    "trigger_action_index": 0,
+    "category": "recon-as-work",
+    "confidence": 0.95,
+    "user_quote": "я правильно понимаю что вместо реализации ты всё снес?",
+    "why_this_action": "Index 0 Bash rm -rf 7 packages — exactly what user calls out"
+  },
+  {
+    "msg_id": 299,
+    "ts": "2026-06-09T11:36:29.484Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 0,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "почему ты подаешь список городов не через enum если нужно принуждать модель к выбору?",
+    "why_this_action": "Agent's index 0 explanation reveals it's a dynamic enum not in grammar — user spots the missed enforcement layer"
+  },
+  {
+    "msg_id": 302,
+    "ts": "2026-06-09T12:03:35.640Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "зачем автогрейдер в литературной задаче на вкус, правильность и грамматику?",
+    "why_this_action": "Agent's index 2 explanation showed grader was the problem — user questions auto-grader for literary task"
+  },
+  {
+    "msg_id": 305,
+    "ts": "2026-06-09T12:22:02.428Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.7,
+    "user_quote": "пока ждём - давай поправим chosen_action профессионально и правильно",
+    "why_this_action": "Earlier message established resolveChosenAction was a kostyl — user refers back to fix it at the right level"
+  },
+  {
+    "msg_id": 333,
+    "ts": "2026-06-10T10:20:11.011Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.8,
+    "user_quote": "там очень наивная имлпементация. куча костылей. коммитить такое не хочется",
+    "why_this_action": "Agent's index 4 is the proud summary of stack-up state — user pushes back on overall quality"
+  },
+  {
+    "msg_id": 345,
+    "ts": "2026-06-10T19:35:45.832Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.9,
+    "user_quote": "чем плох наш подход текущий - если количество нпс будет гораздо больше - то наша грамматика переполнится. нужен подход который скалируется",
+    "why_this_action": "Index 4 AskUserQuestion proposed grammar-enum constraint — user calls out scalability ceiling"
+  },
+  {
+    "msg_id": 346,
+    "ts": "2026-06-10T20:37:08.421Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 1,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "выглядит как костыль",
+    "why_this_action": "Index 1 Edit added Aliases field to schema.go — alias-list workaround the user dismisses"
+  },
+  {
+    "msg_id": 347,
+    "ts": "2026-06-10T21:01:40.343Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 1,
+    "category": "hardcoded-instance",
+    "confidence": 0.95,
+    "user_quote": "что значит \"поступок путника\"? это что за костыль у которого проблемы в грамматике?",
+    "why_this_action": "Index 1 Edit hardcoded 'поступок путника' in memory_narrative.go — exact citation"
+  },
+  {
+    "msg_id": 350,
+    "ts": "2026-06-10T22:42:02.317Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "наша симуляцию очень наивная и отвечает невпопад... надо поднять нашу симуляцию на следующий уровень. коренной принцип: всё есть сущность",
+    "why_this_action": "Agent's index 4 'three commits, clean tree' summary — user calls the whole iteration naive"
+  },
+  {
+    "msg_id": 356,
+    "ts": "2026-06-11T21:24:12.822Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "у нас по-прежнему слишком наивная реализация и куча костылей. 1. проблема с именами и склонениями 2. интеграция нарратора сплошной костыль",
+    "why_this_action": "Agent's index 4 summary claimed e2e done — user disagrees with quality bar"
+  },
+  {
+    "msg_id": 362,
+    "ts": "2026-06-12T10:10:16.962Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 2,
+    "category": "symptom-fix",
+    "confidence": 0.95,
+    "user_quote": "я правильно понимаю что вместо того чтобы фиксить корень ты напихиваешь костыли?",
+    "why_this_action": "Index 2 message describes adding more few-shot examples per NPC (Goran) — exactly the patch-per-instance"
+  },
+  {
+    "msg_id": 363,
+    "ts": "2026-06-12T10:14:10.299Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 0,
+    "category": "hardcoded-instance",
+    "confidence": 0.85,
+    "user_quote": "ты всё равно в промпте имеешь то что пересекается с тестами и приключением. это не общие примеры",
+    "why_this_action": "Index 0 Write of validate.go uses test-set names as examples"
+  },
+  {
+    "msg_id": 365,
+    "ts": "2026-06-12T10:33:24.284Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.9,
+    "user_quote": "давай подумаем сильнее. какие есть варианты решить эту проблему? может есть вариант воспользоваться фразой энштейна про решение на другом уровне?",
+    "why_this_action": "Index 4 AskUserQuestion presented in-prompt vs fixture-bake — user pushes for level-up"
+  },
+  {
+    "msg_id": 367,
+    "ts": "2026-06-12T10:48:58.197Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 1,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "давай честно - а зачем нам это всё? только для филлерных фраз о том где находится персонаж?",
+    "why_this_action": "Index 1 Write of frame.go installed the whole morph LLM frame — user questions the cost-benefit at the higher level"
+  },
+  {
+    "msg_id": 371,
+    "ts": "2026-06-12T14:11:51.295Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.75,
+    "user_quote": "давай разберёмся как наиболее идиоматично и профессионально можно пофиксить каждый из косяков. смотрим в первую очередь на решения с точки зрения архитектуры",
+    "why_this_action": "Agent's index 4 itemized findings — user redirects to architectural framing first"
+  },
+  {
+    "msg_id": 373,
+    "ts": "2026-06-12T16:24:30.558Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 4,
+    "category": "wrong-level",
+    "confidence": 0.95,
+    "user_quote": "мне нужно лучшее решение этого затыка на уровень выше как заповедовал энштейн. текущие решения меня не устраивают",
+    "why_this_action": "Agent's index 4 multi-addressee question — user rejects the solution set, demands level-up"
+  },
+  {
+    "msg_id": 374,
+    "ts": "2026-06-12T19:21:49.457Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 0,
+    "category": "hardcoded-instance",
+    "confidence": 0.95,
+    "user_quote": "covertStems - выглядит как костыль. у нас есть ллм. зачем мы используем подобный грязный подход еще и к конкретному языку привязанный?",
+    "why_this_action": "Index 0 Edit defined the covertStems lexicon — exact target"
+  },
+  {
+    "msg_id": 379,
+    "ts": "2026-06-12T21:02:10.049Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 1,
+    "category": "hardcoded-instance",
+    "confidence": 0.95,
+    "user_quote": "allMentionWords - махровый костыль. избавляемся и ищем способ сделать на другом уровне",
+    "why_this_action": "Index 1 Write documented Доводка №3 including the mention-stubs mechanism the user dislikes"
+  },
+  {
+    "msg_id": 385,
+    "ts": "2026-06-12T21:57:00.303Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 3,
+    "category": "wrong-level",
+    "confidence": 0.85,
+    "user_quote": "для того чтобы всё это починить, нужно как советовал эйнштейн - взобраться еще на один уровень выше",
+    "why_this_action": "Index 3 audit doc lists 15 findings — user wants them resolved at higher abstraction"
+  },
+  {
+    "msg_id": 386,
+    "ts": "2026-06-13T00:09:32.811Z",
+    "file": "816b9632-ce7b-4dce-8576-c0d13df95c5c.jsonl",
+    "trigger_action_index": 2,
+    "category": "wrong-level",
+    "confidence": 0.95,
+    "user_quote": "промпт кристализатора выглядит как сплошной костыль",
+    "why_this_action": "Index 2 Edit modified crystallizer_frame.go's prompt — exact reference"
+  }
+]

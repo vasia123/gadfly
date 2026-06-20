@@ -1,0 +1,296 @@
+[
+  {
+    "case_id": "wl_case_000_edit",
+    "verdict": "pass",
+    "reason": "Edit removed hazardEffects map with only 'fire' — user complains the effect list is too small and asks why limit by name; the action is exactly the constrained catalogue.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_001_edit",
+    "verdict": "pass",
+    "reason": "Edit hardcoded specific Russian phrasing examples (кружку об пол, расколоть полено) into the parser prompt; user explicitly calls out 'зашил тест и сделал костыль'.",
+    "confidence": 0.9
+  },
+  {
+    "case_id": "wl_case_002_edit",
+    "verdict": "pass",
+    "reason": "Same prompt-patching Edit; user calls for 'более железный подход / уровень выше' — the bolted-on rules are exactly what triggers the wrong-level critique.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_003_edit",
+    "verdict": "pass",
+    "reason": "Edit added AllEffects() helper for stem-matching player verbs — user's 'это профессиональное решение?' targets this localized helper approach.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_004_edit",
+    "verdict": "pass",
+    "reason": "Edit to applyEnvironmentalHazards in tick.go is a localized fix; user explicitly asks if the bug is at a higher organizational level — matches the wrong-level critique.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_006_edit",
+    "verdict": "fail",
+    "reason": "User criticises intent_parser.go prompt costyli, but the action is an Edit to engine.go StepRound — different file, different topic (turn engine, not parser prompt).",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_007_bash",
+    "verdict": "pass",
+    "reason": "Commit message explicitly describes fire-specific rescue mechanic (огонь его добивает, дозой жара); user asks if everything is hardcoded for fire — exact match.",
+    "confidence": 0.95
+  },
+  {
+    "case_id": "wl_case_008_bash",
+    "verdict": "pass",
+    "reason": "Commit implements a specific fire-rescue feature; user redirects to 'обобщить на другие ситуации' — matches the localized fix the commit describes.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_009_bash",
+    "verdict": "fail",
+    "reason": "User explicitly says the problem is bad prompt to the neural net, not the CLAUDE.md doc tweak; the action is a CLAUDE.md docs commit — user is pointing to a DIFFERENT layer (prompt level).",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_010_bash",
+    "verdict": "pass",
+    "reason": "Commit message describes fireHeatPerHP/TickProcessor-charged damage; user explicitly questions TickProcessor accruing damage with a constant — direct match.",
+    "confidence": 0.9
+  },
+  {
+    "case_id": "wl_case_011_edit",
+    "verdict": "pass",
+    "reason": "MEMORY.md entry describes the binary StateDestroyed flag for habitability; user asks 'бинарный маркер разрушенности?' — exactly the data shape being summarised.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_012_bash",
+    "verdict": "fail",
+    "reason": "Action is procedural recon grep (no code change); user complains of hardcoded adventure-specific kostyli. Recon doesn't introduce kostyli — critique is about prior work the agent now displays.",
+    "confidence": 0.6
+  },
+  {
+    "case_id": "wl_case_013_bash",
+    "verdict": "pass",
+    "reason": "Bash is a grep+inventory chain that surfaces templateContent code path as justification; user's 'оправдания' matches the rationalization-as-work pattern.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_014_bash",
+    "verdict": "pass",
+    "reason": "Commit message itself uses 'тонкий костыль' to describe the prior approach; user reinforces 'без костылей' continuing — relevant to the committed work.",
+    "confidence": 0.75
+  },
+  {
+    "case_id": "wl_case_015_edit",
+    "verdict": "pass",
+    "reason": "Edit added CueCovered deterministic stem-matching helper — user explicitly asks why use kostyli instead of LLM for fuzzy content; exact match.",
+    "confidence": 0.95
+  },
+  {
+    "case_id": "wl_case_016_edit",
+    "verdict": "fail",
+    "reason": "Edit rewrites Parse() to be a two-stage narrow grammar approach (segment+fill); user asks 'закостылил ровно три действия?' — the visible Edit doesn't show any '3' action limit.",
+    "confidence": 0.65
+  },
+  {
+    "case_id": "wl_case_017_bash",
+    "verdict": "pass",
+    "reason": "Bash probe with comment 'ожидаю ровно 1 удар после схлопа' (visible in agent script) — user questions exactly that expectation ('почему один когда три').",
+    "confidence": 0.8
+  },
+  {
+    "case_id": "wl_case_018_bash",
+    "verdict": "pass",
+    "reason": "Bash run shows the parser response losing repetition (one strike + collapse); user pushes toward higher-level relational fix — matches the symptom shown.",
+    "confidence": 0.75
+  },
+  {
+    "case_id": "wl_case_019_edit",
+    "verdict": "pass",
+    "reason": "Edit explicitly added «пока не упадёт/взмолится» phrasing as hardcoded examples — user quotes that exact phrase as kostyl. Direct hit.",
+    "confidence": 0.95
+  },
+  {
+    "case_id": "wl_case_020_bash",
+    "verdict": "fail",
+    "reason": "Action is a procedural polling `until awk` waiting for parsebench to finish — no two-prompt setup visible in action. User critiques first-prompt feed leaking into second prompt; that decision happened elsewhere.",
+    "confidence": 0.75
+  },
+  {
+    "case_id": "wl_case_021_bash",
+    "verdict": "fail",
+    "reason": "Action is bash running parsebench binary; user asks why model can output English in JSON — points to grammar layer, not this benchmark run.",
+    "confidence": 0.65
+  },
+  {
+    "case_id": "wl_case_022_edit",
+    "verdict": "pass",
+    "reason": "Edit added normalizeFrame() post-hoc normalization wrapper — user calls it kostyl; this kind of after-the-fact fixup is exactly what 'звучит как костыль' targets.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_023_bash",
+    "verdict": "fail",
+    "reason": "Action is just `go build && run segbench`; the layer-mixing decision the user criticises lives in a prompt edit elsewhere. The bash run only invokes the bench.",
+    "confidence": 0.65
+  },
+  {
+    "case_id": "wl_case_024_bash",
+    "verdict": "fail",
+    "reason": "User is a meta-request to update CLAUDE.md to capture a lesson — explicitly listed as FAIL criterion. Not pushback on the shown parserbench run.",
+    "confidence": 0.9
+  },
+  {
+    "case_id": "wl_case_025_bash",
+    "verdict": "fail",
+    "reason": "Action is procedural git status + go build; user asks to go a level up, but the bash itself doesn't contain the costyl-injection. Procedural action vs code-level pushback.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_026_bash",
+    "verdict": "fail",
+    "reason": "Action is just git status / rename detection; user asks for Einstein-level prompt necessity evaluation — but the action shown is procedural, doesn't touch prompts.",
+    "confidence": 0.75
+  },
+  {
+    "case_id": "wl_case_027_edit",
+    "verdict": "fail",
+    "reason": "Edit added held-out conditional/temporal cases to the bench; user asks 'что за mayHaveModality?' — that symbol is NOT in this Edit, points to a different file/edit.",
+    "confidence": 0.8
+  },
+  {
+    "case_id": "wl_case_028_edit",
+    "verdict": "fail",
+    "reason": "Edit shows added Russian conditional bench cases; user asks 'это костыль привязанный к русским словам?' — the cases are Russian bench data, but the kostyl being critiqued is mayHaveModality (a Russian-word gate), not present in this Edit.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_030_edit",
+    "verdict": "pass",
+    "reason": "Edit added bench cases for involuntary-reaction verbs mixing L5 state into the parser layer; user's 'смешивать слои плохо' directly targets cross-layer mixing visible here.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_031_bash",
+    "verdict": "pass",
+    "reason": "Bash grep displays Scene struct with PlayerDeed/Mentions fields; user asks 'что вообще находится в Mentions? текст или айдишники?' — exact field shown.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_033_bash",
+    "verdict": "pass",
+    "reason": "Commit log shows branch 'feat/entity-matching-rework'; user explicitly asks 'какая еще ветка? работаем в мейне!' — direct hit on branch name in the action.",
+    "confidence": 0.95
+  },
+  {
+    "case_id": "wl_case_034_bash",
+    "verdict": "pass",
+    "reason": "Commit message reads 'разведка I-цикла' (recon write-up); user calls it 'отписку вместо реализации' — exact match (docs commit instead of code).",
+    "confidence": 0.95
+  },
+  {
+    "case_id": "wl_case_035_bash",
+    "verdict": "fail",
+    "reason": "Action is git push to main; user asks a forward-looking design question (where to track rough edges — code or TODO.md). New task assignment, not pushback on the push.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_036_bash",
+    "verdict": "pass",
+    "reason": "Commit message explicitly says 'снос орфан-обёрток combat-кластера' (deletion of 7 packages); user asks 'вместо реализации ты всё снес?' — direct match.",
+    "confidence": 0.95
+  },
+  {
+    "case_id": "wl_case_037_bash",
+    "verdict": "pass",
+    "reason": "Bash output shows grammar with hardcoded enum (Monarchy/Republic) but stringval for name fields; user asks why cities list isn't an enum in grammar — points exactly to what the grammar dump shows.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_038_bash",
+    "verdict": "pass",
+    "reason": "Bash invokes llmbench with autograder for translation task; user questions using an autograder for literary task — exact match to the command being run.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_039_bash",
+    "verdict": "fail",
+    "reason": "Action is ls/pgrep checking download status of a GGUF model; user pivots to a different task (fix chosen_action). New task assignment, not pushback.",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_040_bash",
+    "verdict": "pass",
+    "reason": "Bash waits for frontend READY and reports server up; user comments the implementation is naive and full of kostyli — about the frontend the agent just brought up. Reasonable charitable read.",
+    "confidence": 0.55
+  },
+  {
+    "case_id": "wl_case_041_bash",
+    "verdict": "fail",
+    "reason": "Action is grep inspecting OpenAI embedding provider code; user critiques grammar scalability for NPC lists — completely different topic (grammar/enum, not embeddings).",
+    "confidence": 0.85
+  },
+  {
+    "case_id": "wl_case_042_edit",
+    "verdict": "fail",
+    "reason": "Edit's old and new strings are identical (only comment block unchanged) — there's no visible change. User says 'выглядит как костыль' but the action shown is a no-op.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_043_edit",
+    "verdict": "pass",
+    "reason": "Edit added 'поступок путника' string to map; user quotes that exact phrase. Direct hit.",
+    "confidence": 0.98
+  },
+  {
+    "case_id": "wl_case_046_bash",
+    "verdict": "fail",
+    "reason": "Action is just running llmbench -only morph; user asks why agent is patching symptoms instead of root. The bash itself is a benchmark run, not a kostyl-patch.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_047_bash",
+    "verdict": "fail",
+    "reason": "Action is go build + go test (procedural verification). User critiques prompt containing test/adventure-overlapping examples — that's about a prompt content, not visible in this action.",
+    "confidence": 0.75
+  },
+  {
+    "case_id": "wl_case_048_bash",
+    "verdict": "fail",
+    "reason": "Action is `cp /tmp/frame_backup.go ... && go build` — a restore operation. User opens a higher-level brainstorm about options; not pushback on restoring a backup.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_049_edit",
+    "verdict": "pass",
+    "reason": "Edit refines warmName fallback in morph/frame.go (caching morph records); user questions whether the whole morph stuff is worth it just for filler phrases — challenges cost/benefit of the frame.go work directly.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_050_write",
+    "verdict": "pass",
+    "reason": "Write created e2e-audit findings doc with itemised P0/P1/P2 problems; user asks to discuss idiomatic/architectural fixes for the listed problems — natural pushback on listing-without-architecting.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_052_edit",
+    "verdict": "fail",
+    "reason": "Edit adds 'take' action type to the parser prompt; user critiques covertStems (a different concept/symbol not present in this Edit). Symbol mismatch.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_053_bash",
+    "verdict": "fail",
+    "reason": "Action is appending a MEMORY.md note describing Доводка #3 (which explicitly mentions costyl rejection); user critiques allMentionWords — that symbol is not in the MEMORY.md note.",
+    "confidence": 0.7
+  },
+  {
+    "case_id": "wl_case_055_edit",
+    "verdict": "pass",
+    "reason": "Edit modifies crystallizeAt() to feed scene context into the crystallizer prompt; user calls 'промпт кристализатора' a sheer kostyl — same crystallizer prompt being augmented.",
+    "confidence": 0.85
+  }
+]
