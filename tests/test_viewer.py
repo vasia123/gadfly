@@ -279,26 +279,64 @@ def test_api_trail_snapshot_unknown_is_404(viewer_server: str):
     assert code == 404
 
 
-def test_index_html_includes_trail_ui(viewer_server: str):
-    """Smoke-test that the trail UI shipped: tabs, timeline panel,
-    drift-summary container, and the drift-question table the
-    timeline renderer reads from."""
+def test_index_html_includes_observation_log_ui(viewer_server: str):
+    """Smoke-test the redesigned observation-log UI ships its anchors:
+    chart-as-hero (signature element), section structure, canonical
+    question table, level-color encoding, projects tab."""
     code, body = _get_text(viewer_server + "/")
     assert code == 200
-    # Main-pane tabs
-    assert 'id="main-tabs"' in body
-    assert 'data-tab="trail"' in body
-    assert 'data-tab="drift"' in body
-    # Timeline panel container
-    assert 'id="timeline"' in body
-    # Drift-summary chips container
-    assert 'id="drift-summary"' in body
-    # JS renderer entry points
-    assert "function renderTimeline" in body
-    assert "function renderTimelineDrift" in body
-    assert "function renderDriftSummary" in body
-    assert "function toggleDriftKindFilter" in body
-    # Canonical-question lookup table for the timeline
+    # Brand + tabs
+    assert ">Gadfly</h1>" in body
+    assert 'data-tab="sessions"' in body
+    assert 'data-tab="projects"' in body
+    assert 'id="filter-drift"' in body
+    # Canvas anchors
+    assert 'id="canvas"' in body
+    assert "class=\"session-canvas\"" in body or 'class="session-canvas"' in body
+    # SVG chart (signature element) entry points
+    assert "function renderChart" in body
+    assert "<svg" in body or "renderChart" in body  # chart created in JS
+    assert "LEVEL_ORDER" in body
+    assert "LEVEL_COLOR" in body
+    # Section renderers
+    assert "function renderDrifts" in body
+    assert "function renderStops" in body
+    assert "function renderCrumbsList" in body
+    assert "function renderRawRecords" in body
+    # Canonical question lookups (mirrored from prompts.py)
     assert "TRAIL_DRIFT_QUESTIONS" in body
-    # Suppression-explainer (so suppressed drifts don't read as opaque)
-    assert "function suppressionExplain" in body
+    assert "TRAIL_STOP_QUESTION" in body
+    # Distinctive typography choice — confirms the design system
+    # didn't quietly revert to defaults.
+    assert "Spectral" in body
+    assert "IBM Plex Sans" in body
+    assert "JetBrains Mono" in body
+    # Reduced-motion respect — quality floor.
+    assert "prefers-reduced-motion" in body
+
+
+def test_api_sessions_includes_cwd(tmp_log_dir: Path, viewer_server: str):
+    """The redesigned sidebar shows project name (basename of cwd), so
+    /api/sessions must expose `cwd` extracted from the first verdict
+    record's payload. Sessions with no carrier record return cwd=null."""
+    _seed(
+        tmp_log_dir,
+        "with-cwd",
+        [
+            {"type": "verdict", "ts": 1.0, "tool_name": "Edit",
+             "payload": {"cwd": "/home/u/projects/myapp",
+                         "tool_name": "Edit"},
+             "verdict": {"professional": True}},
+        ],
+    )
+    _seed(
+        tmp_log_dir,
+        "no-cwd",
+        [{"ts": 1.0, "tool_name": "Edit", "verdict": {"professional": True}}],
+    )
+    data = _get_json(viewer_server + "/api/sessions")
+    by_id = {s["id"]: s for s in data}
+    assert by_id["with-cwd"]["cwd"] == "/home/u/projects/myapp"
+    assert by_id["no-cwd"]["cwd"] is None
+    # earliest_ts is also exposed so the canvas can compute duration.
+    assert by_id["with-cwd"]["earliest_ts"] == 1.0
