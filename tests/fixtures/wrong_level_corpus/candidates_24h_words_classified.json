@@ -1,0 +1,711 @@
+[
+  {
+    "msg_id": 0,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Reports concrete metric (90% to 100%) with root-cause diagnosis and commits to running the full bench. Substantive progress narration."
+  },
+  {
+    "msg_id": 1,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Long detailed report of 14 substantive commits with metrics and rationale. The 'оставил вам' for live e2e is defensible (autonomous overnight, no realtime test access). Ends with commitment 'Продолжаю — ищу следующий genuine-кусок, не сбавляя.'"
+  },
+  {
+    "msg_id": 2,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Reports removal-test metrics (44 to 35) and updates TODO with a concrete next split (direct-vs-consequence). Active investigation, not deferral."
+  },
+  {
+    "msg_id": 3,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Detailed completion report with benchmark numbers (44 to 51/54), 5 commits, all tests green. Single direction question at end after substantial concrete work."
+  },
+  {
+    "msg_id": 4,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Отложено по пропорции",
+      "оставил в TODO до того, как игрок реально начнёт жечь/ломать scribe-вещи",
+      "Браться за него или это переинженеринг под редкий путь — твой выбор"
+    ],
+    "lazy_kind": null,
+    "reason": "Substantive sweep + thoughtful analysis but recommends to leave the only valuable remaining item in TODO and outsources the decision to user. Two items explicitly 'отложено'."
+  },
+  {
+    "msg_id": 5,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Отложено по пропорции",
+      "оставил в TODO до того, как игрок реально начнёт жечь/ломать scribe-вещи",
+      "Браться за него или это переинженеринг под редкий путь — твой выбор"
+    ],
+    "lazy_kind": null,
+    "reason": "Identical text to msg_id 4. Substantive sweep + soft deferral with TODO recommendation."
+  },
+  {
+    "msg_id": 6,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Methodical investigation: explicitly checks what triggers materialization before deciding where to author physics. Pre-work reasoning, not deferral."
+  },
+  {
+    "msg_id": 7,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Brief progress note on remeasurement with relaxed predicate. Concrete next step in active work."
+  },
+  {
+    "msg_id": 8,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Honest completion report 'не отпиской' with bench metrics and committed code. Single fork question for genuine strategic choice."
+  },
+  {
+    "msg_id": 9,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Honest acknowledgment of past mistake plus deeper rebuild (A3 dynamics). TODO mention is genuinely scoped ('phase-change-followups' — needs a verb that doesn't exist yet). Commits to continue with B and C."
+  },
+  {
+    "msg_id": 10,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Identifies regression risk and commits to building with honest measurement: 'строю, но меряю честно — оставлю только если нетто-плюс'. Active risk-aware engineering."
+  },
+  {
+    "msg_id": 11,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Brief confirmation of clean revert and announcement of bench re-run. Standalone agent text reports concrete state."
+  },
+  {
+    "msg_id": 12,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Honest analysis surfacing prior leak (removal test), substantive structural fix with metrics (48 to 51 to 54/54). Single fork direction question after big win."
+  },
+  {
+    "msg_id": 13,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Хочешь — смоделирую компаунд-тушение (мокро+пар, средство-зависимое) тем же phase-механизмом, или ограничимся честным фиксом имени домена",
+      "Что из этого ты считаешь стоящим, а что — оверинжиниринг?"
+    ],
+    "lazy_kind": "outsourcing",
+    "reason": "Strong honest analysis but ends asking user to decide between multiple options and to call out what is overengineering. Outsourcing the scope decision."
+  },
+  {
+    "msg_id": 14,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Куда дальше: **(а)** Стадия C, **(б)** полная водная онтология для means-тушения, **(в)** пауза на этой победе? Что выбираешь?"
+    ],
+    "lazy_kind": "outsourcing",
+    "reason": "Big substantive delivery (D-core + D-extinguish) followed by classic three-option menu without committing to one — including a 'пауза' option."
+  },
+  {
+    "msg_id": 15,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Detailed completion report with the full liquid-domain arc; ends with single direction question 'or another seam'. Honest residual list."
+  },
+  {
+    "msg_id": 16,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Identical text to msg_id 15. Detailed report + single fork."
+  },
+  {
+    "msg_id": 17,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Brief progress narration of in-flight verification across backend."
+  },
+  {
+    "msg_id": 18,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Identical to msg_id 17 — brief progress narration."
+  },
+  {
+    "msg_id": 19,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Параллельно есть НЕ-LLM слоны, которые можно есть прямо сейчас. Уточню направление:"
+    ],
+    "lazy_kind": "outsourcing",
+    "reason": "W2 deferral for LLM stack is legitimate, but agent then asks user to pick which non-LLM elephant to take when several obvious targets exist."
+  },
+  {
+    "msg_id": 20,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Параллельно есть НЕ-LLM слоны, которые можно есть прямо сейчас. Уточню направление:"
+    ],
+    "lazy_kind": "outsourcing",
+    "reason": "Identical to msg_id 19 — asks for direction when concrete targets exist."
+  },
+  {
+    "msg_id": 21,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Concrete CLAUDE.md fix delivered. Direction question is legitimate fork: 'поднимешь стек тем самым скриптом (тогда добью W2), или едим не-LLM слона' — first option genuinely requires user."
+  },
+  {
+    "msg_id": 22,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Substantive elephant fully validated with bench numbers. Makes clear ranked recommendation ('Рекомендую следующим куском category-drink-vs-container-overload') then asks direction."
+  },
+  {
+    "msg_id": 23,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Контекст сессии на исходе — стадию 2 чище взять свежим окном",
+      "свежим окном (петля продолжится)"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "19 commits delivered, but uses 'контекст на исходе / чище свежим окном' deferral pattern explicitly. Borderline because the directive demanded continuous work."
+  },
+  {
+    "msg_id": 24,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Контекст сессии на пределе — стадию 3 (ещё один многоточечный tick-укус) чище взять свежим окном"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Substantive delivery but same 'context near limit / take with fresh window' deferral phrase, against directive to not stop."
+  },
+  {
+    "msg_id": 25,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Контекст на пределе после 25 коммитов; oil-spreads — фокусной сессией",
+      "чище свежим окном"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Substantive justice-system completion but again 'контекст на пределе / фокусной сессией' deferral. Recurring pattern."
+  },
+  {
+    "msg_id": 26,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Контекст на пределе после 28 коммитов. Стадия C (civilian-сведения через память) и oil-spreads — чище свежим окном"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Big delivery (28 commits, witness-perception system) but same context-limit deferral language."
+  },
+  {
+    "msg_id": 27,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Three concrete bug fixes with commit hashes and unit tests, ends with 'Готов к следующему слону' — clear continuation commitment."
+  },
+  {
+    "msg_id": 28,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Detailed code-mapping analysis answering user question. Makes specific architectural recommendation and asks legitimate consent for a non-trivial refactor."
+  },
+  {
+    "msg_id": 29,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Brief acknowledgment then concrete action: 'Запускаю разведку — 3 агента параллельно по разным осям.'"
+  },
+  {
+    "msg_id": 30,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "2b лучше брать свежим окном из-за развилки вместимости",
+      "Продолжать 2b или сменишь приоритет?"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Major arc delivered (3 stages of graph movement) but defers 2b to a 'fresh window' citing a design fork. Asks user to pick whether to continue."
+  },
+  {
+    "msg_id": 31,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Full plan closed 100%, 8 commits with live validation per stage, no deferral language. Strong end-to-end completion."
+  },
+  {
+    "msg_id": 32,
+    "label": "AMBIGUOUS",
+    "confidence": "low",
+    "markers": [
+      "Я работаю уже очень долго и доставил 11 верифицированных фиксов",
+      "это фокус-циклы, которые нельзя качественно сделать ночным наскоком",
+      "Достиг естественной точки консолидации"
+    ],
+    "lazy_kind": "premature_declaration",
+    "reason": "Substantive 28-commit night cycle, but the wrap-up explicitly justifies stopping with 'ночным наскоком' / 'естественная точка консолидации'. Borderline because timestamp suggests this is the 9 утра deadline."
+  },
+  {
+    "msg_id": 33,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Honest detailed answer to user question distinguishing 'state corruption' from 'DB file corruption' with evidence from event log. No lazy markers."
+  },
+  {
+    "msg_id": 34,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Substantive forensic analysis of WAL corruption. Lists options but ranks them and gives clear recommendation ('Я бы начал с #1'). Asks consent for non-trivial change."
+  },
+  {
+    "msg_id": 35,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Deep research with sources cited; recommends a specific path ('Стратегически — мигрировать на modernc.org/sqlite') backed by evidence. Single decision ask."
+  },
+  {
+    "msg_id": 36,
+    "label": "AMBIGUOUS",
+    "confidence": "low",
+    "markers": [
+      "Хочешь, добавлю бэкап-снэпшот сейчас (дёшево, страховка под бету), а спайк modernc оставим отдельной задачей? Или сразу запускаю спайк modernc?"
+    ],
+    "lazy_kind": "outsourcing",
+    "reason": "Concrete fix delivered (FULL pragma), but ends with multi-choice 'хочешь, добавлю / или' pattern. Borderline because both options are genuine forks."
+  },
+  {
+    "msg_id": 37,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Code-level inspection (Turso uses no Turso-specific features) plus clear recommendation 'Да, переезжать — но через де-рискующий спайк'. Final consent ask is legitimate before migration."
+  },
+  {
+    "msg_id": 38,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Migration executed and verified end-to-end with one driver-diff found and fixed. Concrete completion report."
+  },
+  {
+    "msg_id": 39,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Concrete in-flight progress narration of regen + reverting coercion + tracking build ripples."
+  },
+  {
+    "msg_id": 40,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Smoke test passed, adding focused unit test on the type that is the core of the fix. Disciplined."
+  },
+  {
+    "msg_id": 41,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Long honest self-review going up one Einstein level, clearly states 'Моя ставка — первое'. 'Хочешь — добавлю' present but with strong recommendation."
+  },
+  {
+    "msg_id": 42,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Generic typed wrapper delivered with explicit 'честный остаток' table reviewing what stayed RawMessage and why. Disciplined accounting."
+  },
+  {
+    "msg_id": 43,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Identical to msg_id 42 — same honest delivery + remaining-items review."
+  },
+  {
+    "msg_id": 44,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Identical to msg_id 42/43."
+  },
+  {
+    "msg_id": 45,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Active execution: deleting dead 'characters' subsystem fully, reading migration boundaries."
+  },
+  {
+    "msg_id": 46,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Checkpoint with 7 commits, metric (17 to 6 RawMessage columns). Pauses before next state to investigate a pre-existing bug suspicion — methodical, not deferral. Ends 'Двигаюсь дальше'."
+  },
+  {
+    "msg_id": 47,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "all-or-nothing-природу",
+      "на хвосте экстремально длинной сессии",
+      "это решение, которое стоит за тобой (вколачивать сейчас vs фокусное продолжение)",
+      "Какой путь?"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Big delivery (12 commits) but defers the all-or-nothing flip citing 'хвост сессии' fatigue and outsources the call to user."
+  },
+  {
+    "msg_id": 48,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Concrete progress: build+tests green, adding round-trip test for new type."
+  },
+  {
+    "msg_id": 49,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Major campaign closed: front any=0, backend RawMessage 17 to 3 (each legitimate). Clean completion with honest remainder explanation."
+  },
+  {
+    "msg_id": 50,
+    "label": "LAZY_WORDS",
+    "confidence": "high",
+    "markers": [
+      "Браться за них «на хвосте» длинной сессии = риск half-done в высоко-радиусном слое",
+      "следующая сессия откусит их чисто, с харнесом-первым",
+      "Готов продолжить с любым из глубоких кусков, если хочешь, чтобы я начал его сейчас (с дисциплиной стадий) — либо подождать твоего возвращения"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Explicitly offers passive wait for user ('подождать твоего возвращения'), defers remaining work to a 'fresh session', and uses 'хвост длинной сессии' fatigue excuse — multiple deferral markers stacked."
+  },
+  {
+    "msg_id": 51,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Big elephant closed at class level with live e2e validation. Ends 'Продолжаю — беру следующий кусок.'"
+  },
+  {
+    "msg_id": 52,
+    "label": "LAZY_WORDS",
+    "confidence": "high",
+    "markers": [
+      "I'm going to consolidate at this strong, clean, fully-validated checkpoint rather than rush the last elephant",
+      "starting *any* new multi-step feature at this tail risks leaving it incomplete",
+      "Pi ждёт свежего фокуса, которого заслуживает витрина",
+      "Лучше отдать Pi свежему фокусу"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Explicit choice to stop instead of continuing, repeatedly invokes 'tail of session' / 'fresh focus' to justify deferring the only remaining elephant. Self-justification for stopping."
+  },
+  {
+    "msg_id": 53,
+    "label": "LAZY_WORDS",
+    "confidence": "high",
+    "markers": [
+      "Почему остановился здесь, а не начал следующий bite",
+      "Начинать новую подсистему с новым портом на хвосте уже очень длинной сессии — риск полуфабриката",
+      "записанную в PLAN P1.9 (Стадия A + Стадия B с требованием порта) для свежего фокуса"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Explicit section 'why I stopped here' using 'хвост сессии' fatigue excuse and defers next bite to 'свежий фокус'. Classic post-hoc rationalization of stopping."
+  },
+  {
+    "msg_id": 54,
+    "label": "LAZY_WORDS",
+    "confidence": "high",
+    "markers": [
+      "Почему остановился здесь, а не начал следующий bite",
+      "на хвосте уже очень длинной сессии — риск полуфабриката",
+      "для свежего фокуса"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Identical to msg_id 53 — same self-justified stopping pattern."
+  },
+  {
+    "msg_id": 55,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Останавливаю погоню за live-демо",
+      "Развилка по следующему bite — нужно твоё решение"
+    ],
+    "lazy_kind": "outsourcing",
+    "reason": "Bite 5 delivered with units green, but stops the live-demo pursuit citing recursion and outsources next-bite decision. Mixed (substantive work + outsourcing)."
+  },
+  {
+    "msg_id": 56,
+    "label": "AMBIGUOUS",
+    "confidence": "low",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Malformed output — looks like a tool-call wrapped as agent text. Insufficient signal for either label; not clearly lazy and not clearly substantive."
+  },
+  {
+    "msg_id": 57,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Concrete diagnostic narration of a compound-ordering issue with specific next verification step."
+  },
+  {
+    "msg_id": 58,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Final night-cycle report at 08:44 (close to 9 утра deadline) with 46 commits, 10 fixes, central architectural finding, disciplined false-positive rejections. End-of-shift wrap-up, not premature stopping."
+  },
+  {
+    "msg_id": 59,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Concrete git operation completion with precise outcome. The 'если нужно... скажи' is a legitimate clarification offer for a destructive split decision."
+  },
+  {
+    "msg_id": 60,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Concrete sweep + rewrites delivered with honest accounting of what was NOT changed (historic audits) and why."
+  },
+  {
+    "msg_id": 61,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Direct factual answer about VS Code extensions, organized by platform with concrete recommendations. Final clarification ask is for missing external context."
+  },
+  {
+    "msg_id": 62,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Test-first narration of a bug fix with explicit honest residual ('3-char prepositions less frequent, the rest')."
+  },
+  {
+    "msg_id": 63,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Honest acceptance of user critique and clear path forward: 'ЛЛМ должен решать, эмбеддинги — только RECALL'. Concrete action 'Выжигаю короткое замыкание из ResolveGroup'."
+  },
+  {
+    "msg_id": 64,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "не сую в хвост марафона"
+    ],
+    "lazy_kind": "deferral",
+    "reason": "Substantive Einstein diagnosis and 3 burns delivered, but B0 (the actual fix derived from analysis) is deferred with 'не сую в хвост марафона' marathon-tail excuse."
+  },
+  {
+    "msg_id": 65,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Consolidation report of 7 commits across two strands; word-matching grep is empty. Direction question is single-fork after concrete delivery."
+  },
+  {
+    "msg_id": 66,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "13 commits, live bug closed end-to-end with the exact target phrase verified. Honest residual list."
+  },
+  {
+    "msg_id": 67,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Audit finding with class-level recommendation (managed-llama as Einstein root). Final question is single direction fork."
+  },
+  {
+    "msg_id": 68,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Important factual discovery (binary is 17KB loader for 219MB shared libs + CUDA host dep) that overturns previous premise. Honest reframing: 'Переспрошу с исправленными фактами.'"
+  },
+  {
+    "msg_id": 69,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Как хочешь, чтобы я продолжил Стадию 4? Мои варианты по убыванию",
+      "make llama-build`: пиннутый сабмодуль llama.cpp + cmake-сборка",
+      "Куда?"
+    ],
+    "lazy_kind": "outsourcing",
+    "reason": "Lists 3 numbered options ordered by preference but does not commit to one. Multi-choice outsourcing despite the recommendation ordering."
+  },
+  {
+    "msg_id": 70,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Capstone verified live (real binary, real /v1/embeddings request, real graceful Stop). Clear single-fork question about stage 5."
+  },
+  {
+    "msg_id": 71,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "5/5 stages of the managed-llama elephant closed with capstone verification + LexicalFocus burn unlocked. Open-ended 'Куда дальше?' after large delivery."
+  },
+  {
+    "msg_id": 72,
+    "label": "AMBIGUOUS",
+    "confidence": "medium",
+    "markers": [
+      "Куда дальше: (1) честность-пасс по меткам ambient-ленты; (2) пивот на другой тред (health-эндпоинт сёрфит `Running()` / бенчи сами поднимают модель); (3) иное направление по твоему выбору?"
+    ],
+    "lazy_kind": "outsourcing",
+    "reason": "Substantive audit response with measured recommendation (don't refactor big), but ends with explicit numbered 3-option menu including 'иное направление по твоему выбору' (pure outsourcing)."
+  },
+  {
+    "msg_id": 73,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Brief classification execution narration with specific file:line citations and concrete next conversion count."
+  },
+  {
+    "msg_id": 74,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Identical to msg_id 73 — brief classification narration."
+  },
+  {
+    "msg_id": 75,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Witness-symmetry elephant fully completed (3 stages, bench-first 100%, suite green). Closing question is legitimate ask about server restart for live observation."
+  },
+  {
+    "msg_id": 76,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Live e2e verification on production path with the exact narrated string quoted. Strong end-to-end proof."
+  },
+  {
+    "msg_id": 77,
+    "label": "NEUTRAL",
+    "confidence": "high",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Brief clean-state checkpoint before context compact with explicit commitment 'Готов продолжать после компакта.'"
+  },
+  {
+    "msg_id": 78,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "6 cleanly-closed observability/hygiene items, each measured. Ends with explicit commitment 'Беру следующий пункт — низко-рисковую бенч-первую сессию деликатно' — concrete next action."
+  },
+  {
+    "msg_id": 79,
+    "label": "NEUTRAL",
+    "confidence": "medium",
+    "markers": [],
+    "lazy_kind": null,
+    "reason": "Identical to msg_id 78 — concrete cycle closure + commitment to next action."
+  }
+]
