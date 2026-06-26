@@ -497,14 +497,30 @@ def main() -> int:
                 hook_out["hookSpecificOutput"] = hso
 
         # SHADOW mode: hook runs everything (journal, trail, watchdog) and
-        # writes the full audit trail to disk, but emits NOTHING to the
-        # agent's additionalContext. The viewer reads the audit log, so
-        # the user can eyeball the trail's "правильно ли срабатывает"
-        # before flipping to live feedback. Cost: same latency as live
-        # mode; benefit: zero behavioural side-effects on the agent while
-        # validating the rubric.
+        # writes the full audit trail to disk, but suppresses agent-facing
+        # output. Two levels:
+        #
+        #   GADFLY_SHADOW=1, GADFLY_TRAIL_FEEDBACK=0
+        #     full shadow — nothing reaches the agent. Use during
+        #     trail-rubric eyeball validation.
+        #
+        #   GADFLY_SHADOW=1, GADFLY_TRAIL_FEEDBACK=1
+        #     watchdog + journal phase-C output dropped; trail's
+        #     pre-canned Socratic question (TRAIL_DRIFT_QUESTIONS[kind])
+        #     still reaches the agent. This is the explicit-channel mode
+        #     the user opted in for: the agent ONLY ever hears the
+        #     fixed, well-crafted Einstein question — no variable
+        #     model-generated critique.
         if os.environ.get("GADFLY_SHADOW", "0") == "1":
-            hook_out = None
+            if trail_msg:
+                hook_out = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": trail_msg,
+                    }
+                }
+            else:
+                hook_out = None
 
         _emit_hook_output(hook_out)
 

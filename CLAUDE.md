@@ -417,7 +417,15 @@ only. Belt-and-braces: `tool_name == "Task"` is also not in
 |-----------------------------|---------|-----------------------------------------|
 | `GADFLY_TRAIL`              | `1`     | trail runs on every PostToolUse         |
 | `GADFLY_TRAIL_FEEDBACK`     | `0`     | drift questions reach agent (Phase 2)   |
-| `GADFLY_SHADOW`             | `0`     | hook produces zero additionalContext    |
+| `GADFLY_SHADOW`             | `0`     | hook silences watchdog + phase-C output |
+
+`SHADOW=1` + `TRAIL_FEEDBACK=1` is a third meaningful mode: the
+ONLY thing the agent ever hears is the trail's fixed canonical
+question. Watchdog's variable text and journal Phase-C priors stay
+in the audit log (viewer reads them) but never reach the agent's
+context. This is the production-safe "live" mode for users who want
+trail steering without re-introducing the watchdog noise they
+disabled earlier.
 
 Three phases:
 - **Phase 0 — full shadow.** `GADFLY_SHADOW=1`. Hook runs, audit log

@@ -120,10 +120,72 @@ def test_hook_emits_additional_context_when_unprofessional(monkeypatch, tmp_log_
     assert rec["verdict"]["professional"] is False
 
 
+def test_hook_shadow_with_trail_feedback_emits_only_trail_question(
+    monkeypatch, tmp_log_dir: Path,
+):
+    """GADFLY_SHADOW=1 + GADFLY_TRAIL_FEEDBACK=1: hook silences watchdog
+    and journal Phase-C but lets the trail's pre-canned Socratic
+    question through. The agent ONLY hears the fixed Einstein question,
+    no variable model-generated text."""
+    from gadfly import trail as trail_mod
+    from gadfly.prompts import TRAIL_DRIFT_QUESTIONS
+
+    monkeypatch.setenv("GADFLY_SHADOW", "1")
+    monkeypatch.setenv("GADFLY_TRAIL", "1")
+    monkeypatch.setenv("GADFLY_TRAIL_FEEDBACK", "1")
+    # Watchdog flags — its variable text MUST NOT reach the agent.
+    watchdog_verdict = Verdict(
+        professional=False, reason="watchdog noise", suggestion="don't show",
+    )
+    # Trail flags with delivered=true — its canonical question MUST reach.
+    fake_trail = trail_mod.TrailUpdateResult(
+        trail=trail_mod.empty_trail(),
+        drift_flag=trail_mod.DriftFlag(
+            action_index=1,
+            drift_kind="hardcoded_instance",
+            drift_reasoning="model audit text — never goes to agent",
+            cited_action_indexes=[1, 2, 3],
+            suppressed=False,
+            delivered_to_agent=True,
+            ts=0.0,
+        ),
+        error=None,
+        skipped_reason=None,
+        latency_ms=0.0,
+        diff_summary=[],
+    )
+    with patch.object(
+        hook.watchdog, "evaluate",
+        return_value=EvaluationResult(watchdog_verdict, None),
+    ), patch.object(
+        hook.trail, "update_for_action", return_value=fake_trail,
+    ):
+        rc, out = _run_hook(
+            monkeypatch,
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "a.py", "old_string": "x", "new_string": "y"},
+                "tool_response": {"success": True},
+                "session_id": "shadow_trail",
+                "transcript_path": "",
+            },
+        )
+    assert rc == 0
+    assert out, "trail message should have reached the agent"
+    payload = json.loads(out)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    # Canonical question for hardcoded_instance reaches verbatim.
+    assert ctx == TRAIL_DRIFT_QUESTIONS["hardcoded_instance"]
+    # Watchdog's variable text MUST NOT leak.
+    assert "watchdog noise" not in ctx
+    assert "don't show" not in ctx
+
+
 def test_hook_shadow_mode_swallows_additional_context(monkeypatch, tmp_log_dir: Path):
-    """GADFLY_SHADOW=1: hook runs everything, writes audit log, but the
-    additionalContext stays out of the agent's view. Used to validate
-    the trail rubric on real sessions before flipping FEEDBACK on."""
+    """GADFLY_SHADOW=1 + GADFLY_TRAIL_FEEDBACK=0: full shadow, nothing
+    reaches the agent. Used to validate the trail rubric on real
+    sessions before flipping FEEDBACK on."""
     monkeypatch.setenv("GADFLY_SHADOW", "1")
     verdict = Verdict(professional=False, reason="symptom fix", suggestion="x")
     with patch.object(
