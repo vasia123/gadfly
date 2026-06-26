@@ -42,3 +42,8 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # explicitly (and mock run_query the way test_trail.py does).
     monkeypatch.setenv("GADFLY_TRAIL", "0")
     monkeypatch.setenv("GADFLY_TRAIL_FEEDBACK", "0")
+    # SHADOW mode swallows additionalContext in production. In unit
+    # tests we EXPLICITLY validate that flag verdicts surface — so we
+    # must neutralise the env var the .env file leaked in via
+    # hook._load_env_file_once().
+    monkeypatch.setenv("GADFLY_SHADOW", "0")

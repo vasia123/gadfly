@@ -457,6 +457,66 @@ _INDEX_HTML = r"""<!doctype html>
   .trail-drift-banner .badge.delivered { background: rgba(111,207,151,0.18); color: #6fcf97; }
   .trail-drift-banner .question { margin-top: 8px; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; padding: 8px 10px; background: rgba(0,0,0,0.20); border-radius: 4px; border: 1px solid var(--border); }
   .trail-drift-banner .cites { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
+  .trail-drift-banner .suppress-reason { margin-top: 8px; font-size: 11.5px; color: var(--muted); padding: 6px 10px; background: rgba(138,147,166,0.10); border-radius: 4px; border-left: 2px solid var(--muted); }
+  .trail-drift-banner .suppress-reason b { color: var(--text); }
+
+  /* Tabs above records (All / Trail / Drift) */
+  .tabs-main { display: flex; gap: 2px; padding: 8px 28px 0; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .tabs-main .tab-main { padding: 8px 14px; cursor: pointer; color: var(--muted); border-radius: 6px 6px 0 0; user-select: none; font-size: 12.5px; }
+  .tabs-main .tab-main:hover { color: var(--text); }
+  .tabs-main .tab-main.active { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-bottom: 1px solid var(--panel); margin-bottom: -1px; }
+  .tabs-main .tab-main .num { color: var(--muted); margin-left: 4px; font-size: 11px; }
+  .tabs-main .tab-main.active .num { color: var(--accent); }
+
+  /* Drift-kind chips summary (above records, when on Trail/Drift tab) */
+  .drift-summary { padding: 14px 28px 8px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .drift-summary .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-right: 8px; }
+  .drift-summary .chip { font-size: 12px; padding: 3px 10px; border-radius: 999px; cursor: pointer; user-select: none; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  .drift-summary .chip .n { color: var(--muted); margin-left: 6px; font-size: 11px; }
+  .drift-summary .chip:hover { border-color: var(--accent); }
+  .drift-summary .chip.active { background: rgba(138,180,248,0.18); border-color: var(--accent); color: var(--accent); }
+  .drift-summary .chip.muted { opacity: 0.5; }
+  .drift-summary .clear { font-size: 11.5px; color: var(--muted); margin-left: auto; cursor: pointer; text-decoration: underline; }
+  .drift-summary .clear:hover { color: var(--text); }
+
+  /* Timeline view — vertical breadcrumb path with drift overlays */
+  .timeline-panel { padding: 18px 28px 80px; }
+  .timeline-empty { color: var(--muted); font-style: italic; padding: 30px 0; text-align: center; }
+  .timeline-stats { display: flex; gap: 18px; margin-bottom: 18px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font-size: 12.5px; flex-wrap: wrap; }
+  .timeline-stats .stat { color: var(--muted); }
+  .timeline-stats .stat b { color: var(--text); font-weight: 600; }
+  .timeline-rail { position: relative; padding-left: 22px; border-left: 2px solid var(--border); }
+  .timeline-node { position: relative; padding: 10px 0 10px 16px; }
+  .timeline-node::before { content: ""; position: absolute; left: -28px; top: 18px; width: 10px; height: 10px; border-radius: 999px; border: 2px solid var(--bg); }
+  .timeline-node.lvl-instance::before { background: #f08a8a; }
+  .timeline-node.lvl-class::before { background: #f0c674; }
+  .timeline-node.lvl-architecture::before { background: #6fcf97; }
+  .timeline-node.lvl-rationalization::before { background: #8a93a6; }
+  .timeline-node.lvl-unclear::before { background: #4a5468; }
+  .timeline-node .crumb-head { display: flex; gap: 10px; align-items: baseline; }
+  .timeline-node .ai { font-family: "SF Mono", Menlo, monospace; color: var(--muted); font-size: 11.5px; }
+  .timeline-node .lvl { font-family: "SF Mono", Menlo, monospace; font-size: 10.5px; padding: 1px 6px; border-radius: 3px; }
+  .timeline-node .lvl.instance { background: rgba(240,138,138,0.18); color: #f08a8a; }
+  .timeline-node .lvl.class { background: rgba(240,198,116,0.18); color: #f0c674; }
+  .timeline-node .lvl.architecture { background: rgba(111,207,151,0.18); color: #6fcf97; }
+  .timeline-node .lvl.rationalization { background: rgba(138,147,166,0.20); color: var(--muted); }
+  .timeline-node .lvl.unclear { background: rgba(74,84,104,0.30); color: #8a93a6; }
+  .timeline-node .text { font-size: 13.5px; color: var(--text); margin-top: 4px; line-height: 1.4; }
+  .timeline-node .action { font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; color: var(--muted); margin-top: 4px; white-space: pre-wrap; padding: 6px 8px; background: rgba(0,0,0,0.18); border-radius: 3px; }
+  .timeline-drift-marker { position: relative; padding: 8px 0 8px 16px; margin: 4px 0 4px -2px; border-left: 2px solid #f08a8a; background: rgba(240,138,138,0.06); border-radius: 0 4px 4px 0; }
+  .timeline-drift-marker::before { content: "⚠"; position: absolute; left: -28px; top: 8px; width: 10px; height: 10px; color: #f08a8a; font-size: 14px; line-height: 10px; text-align: center; }
+  .timeline-drift-marker .head { display: flex; gap: 8px; align-items: baseline; font-size: 12px; flex-wrap: wrap; }
+  .timeline-drift-marker .kind { font-family: "SF Mono", Menlo, monospace; font-size: 10.5px; background: rgba(240,138,138,0.20); color: #f08a8a; padding: 1px 6px; border-radius: 3px; }
+  .timeline-drift-marker.suppressed { border-left-color: var(--muted); background: rgba(138,147,166,0.06); opacity: 0.85; }
+  .timeline-drift-marker.suppressed::before { color: var(--muted); content: "·"; }
+  .timeline-drift-marker.suppressed .kind { background: rgba(138,147,166,0.16); color: var(--muted); }
+  .timeline-drift-marker .badge { font-size: 10px; padding: 0 5px; border-radius: 3px; }
+  .timeline-drift-marker .badge.delivered { background: rgba(111,207,151,0.18); color: #6fcf97; }
+  .timeline-drift-marker .badge.suppressed { background: rgba(138,147,166,0.20); color: var(--muted); }
+  .timeline-drift-marker .reason { font-size: 11.5px; color: var(--muted); margin-top: 4px; line-height: 1.45; }
+  .timeline-drift-marker .cites { font-size: 11px; color: var(--muted); margin-top: 4px; font-family: "SF Mono", Menlo, monospace; }
+  .timeline-drift-marker details > summary { font-size: 11.5px; color: var(--muted); cursor: pointer; margin-top: 4px; }
+  .timeline-drift-marker .question { font-size: 12px; line-height: 1.5; white-space: pre-wrap; padding: 6px 8px; background: rgba(0,0,0,0.18); border-radius: 3px; border: 1px solid var(--border); margin-top: 4px; }
   .tabbar { display: flex; gap: 4px; padding: 8px 12px 0; border-bottom: 1px solid var(--border); background: var(--panel); }
   .tabbar .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-radius: 6px 6px 0 0; user-select: none; }
   .tabbar .tab:hover { color: var(--text); }
@@ -550,7 +610,14 @@ _INDEX_HTML = r"""<!doctype html>
       <h2 id="session-title">select a session</h2>
       <div class="sid" id="session-sid"></div>
     </div>
+    <div class="tabs-main" id="main-tabs" style="display:none">
+      <div class="tab-main active" data-tab="all" onclick="setMainTab('all')">All<span class="num" id="num-all"></span></div>
+      <div class="tab-main" data-tab="trail" onclick="setMainTab('trail')">Trail<span class="num" id="num-trail"></span></div>
+      <div class="tab-main" data-tab="drift" onclick="setMainTab('drift')">Drift<span class="num" id="num-drift"></span></div>
+    </div>
+    <div class="drift-summary" id="drift-summary" style="display:none"></div>
     <div class="records" id="records"></div>
+    <div class="timeline-panel" id="timeline" style="display:none"></div>
   </main>
 </div>
 
@@ -574,6 +641,15 @@ let projects = [];
 let currentProject = null;
 let lastProjectsSig = "";
 let flaggedOnly = localStorage.getItem("gadfly.flaggedOnly") === "1";
+// Main-pane tab: "all" (every record type), "trail" (timeline view of
+// breadcrumbs + drift overlays), "drift" (drift events only).
+let mainTab = localStorage.getItem("gadfly.mainTab") || "all";
+// When set, filter drift cards / timeline-drift-markers to just this kind.
+// Toggled by clicking the chips in the drift-summary bar.
+let driftKindFilter = null;
+// Cache of the latest trail snapshot loaded for the current session, so
+// switching tabs doesn't refetch needlessly.
+let cachedTrailSnapshot = { sid: null, sha: null, data: null };
 // Pagination state. We always request the LAST N records from the API
 // (newest live at the file's tail). `loadedCount` grows when the user
 // clicks "show N more"; refresh re-fetches with the same loadedCount so
@@ -593,8 +669,9 @@ function toggleFlaggedOnly() {
   flaggedOnly = !flaggedOnly;
   localStorage.setItem("gadfly.flaggedOnly", flaggedOnly ? "1" : "0");
   document.getElementById("flagged-toggle").classList.toggle("on", flaggedOnly);
+  lastRecordsSig = "";
   renderSessions();
-  renderRecords(currentRecords);
+  renderForCurrentTab();
   // If the active session is now hidden, switch to the first visible one.
   if (flaggedOnly && currentSession) {
     const visible = sessions.filter(s => s.flagged > 0);
@@ -673,9 +750,14 @@ async function loadSession(id, switchTo) {
     currentSession = id;
     loadedCount = PAGE_SIZE;  // reset pagination when switching sessions
     lastRecordsSig = "";
+    // Switching sessions invalidates the trail snapshot cache.
+    cachedTrailSnapshot = { sid: null, sha: null, data: null };
+    // Drop kind-filter — relevant to one session only.
+    driftKindFilter = null;
     renderSessions();
     document.getElementById("session-title").textContent = "session";
     document.getElementById("session-sid").textContent = id;
+    document.getElementById("main-tabs").style.display = "flex";
   }
   try {
     const r = await fetch(
@@ -690,10 +772,102 @@ async function loadSession(id, switchTo) {
       currentRecords = payload.records || [];
       currentTotal = payload.total || currentRecords.length;
     }
-    renderRecords(currentRecords);
+    renderForCurrentTab();
   } catch (e) {
     console.error(e);
   }
+}
+
+function setMainTab(tab) {
+  if (tab === mainTab) return;
+  mainTab = tab;
+  localStorage.setItem("gadfly.mainTab", tab);
+  for (const el of document.querySelectorAll(".tabs-main .tab-main")) {
+    el.classList.toggle("active", el.dataset.tab === tab);
+  }
+  // Force a fresh render — tab switch invalidates the "skip when unchanged" cache.
+  lastRecordsSig = "";
+  renderForCurrentTab();
+}
+
+function trailRecords() {
+  return currentRecords.filter(r => r.type === "trail_update");
+}
+function driftRecords() {
+  return trailRecords().filter(r => r.drift_detected);
+}
+
+function updateTabCounts() {
+  const all = currentRecords.length;
+  const tr = trailRecords().length;
+  const dr = driftRecords().length;
+  document.getElementById("num-all").textContent = all ? all : "";
+  document.getElementById("num-trail").textContent = tr ? tr : "";
+  document.getElementById("num-drift").textContent = dr ? dr : "";
+}
+
+function renderForCurrentTab() {
+  updateTabCounts();
+  const recordsEl = document.getElementById("records");
+  const timelineEl = document.getElementById("timeline");
+  const summaryEl = document.getElementById("drift-summary");
+  if (mainTab === "all") {
+    recordsEl.style.display = "";
+    timelineEl.style.display = "none";
+    summaryEl.style.display = "none";
+    renderRecords(currentRecords);
+    return;
+  }
+  if (mainTab === "drift") {
+    recordsEl.style.display = "";
+    timelineEl.style.display = "none";
+    renderDriftSummary();
+    renderRecords(currentRecords);  // dispatcher uses mainTab to filter
+    return;
+  }
+  // mainTab === "trail"
+  recordsEl.style.display = "none";
+  timelineEl.style.display = "";
+  renderDriftSummary();
+  renderTimeline();
+}
+
+function renderDriftSummary() {
+  const el = document.getElementById("drift-summary");
+  const drifts = driftRecords();
+  if (drifts.length === 0) {
+    el.style.display = "none";
+    return;
+  }
+  const counts = {};
+  for (const r of drifts) {
+    const kind = r.drift_kind || "other";
+    counts[kind] = (counts[kind] || 0) + 1;
+  }
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const total = drifts.length;
+  const delivered = drifts.filter(r => r.delivered_to_agent).length;
+  const suppressed = total - delivered;
+  let html = `<span class="label">drift × ${total}</span>`;
+  html += `<span class="label" style="color:#6fcf97;">${delivered} delivered</span>`;
+  if (suppressed > 0) {
+    html += `<span class="label" style="color:var(--muted);">${suppressed} suppressed</span>`;
+  }
+  for (const [kind, n] of sorted) {
+    const active = driftKindFilter === kind;
+    html += `<span class="chip ${active ? 'active' : ''}" onclick="toggleDriftKindFilter('${escapeHtml(kind)}')">${escapeHtml(kind)}<span class="n">${n}</span></span>`;
+  }
+  if (driftKindFilter) {
+    html += `<span class="clear" onclick="toggleDriftKindFilter(null)">clear filter</span>`;
+  }
+  el.innerHTML = html;
+  el.style.display = "flex";
+}
+
+function toggleDriftKindFilter(kind) {
+  driftKindFilter = (driftKindFilter === kind) ? null : kind;
+  lastRecordsSig = "";
+  renderForCurrentTab();
 }
 
 function loadMore() {
@@ -712,21 +886,50 @@ function openAttr(r, kind) {
 function renderRecords(records) {
   const root = document.getElementById("records");
   if (!records) { root.innerHTML = ""; return; }
+  // The dispatcher slices records by mainTab BEFORE applying the
+  // flaggedOnly filter — so "Drift" tab shows drift cards only, even
+  // when flagged-only is off.
+  let scoped;
+  if (mainTab === "drift") {
+    scoped = records.filter(r =>
+      r.type === "trail_update" && r.drift_detected
+      && (driftKindFilter === null || r.drift_kind === driftKindFilter)
+    );
+  } else {
+    scoped = records;
+    if (driftKindFilter !== null) {
+      // Even on the All tab the chip is honoured — narrows drift records
+      // to one kind while leaving non-trail records visible.
+      scoped = scoped.filter(r =>
+        r.type !== "trail_update"
+        || !r.drift_detected
+        || r.drift_kind === driftKindFilter
+      );
+    }
+  }
   const visible = flaggedOnly
-    ? records.filter(r =>
+    ? scoped.filter(r =>
         (r.verdict && r.verdict.professional === false)
-        || (r.type === "goal_distill" && r.error)  // failed goal events stay visible
+        || (r.type === "goal_distill" && r.error)
         || (r.type === "journal_update" && (r.error || r.skipped_reason))
         || (r.type === "trail_update" && (r.drift_detected || r.error))
       )
-    : records;
-  const sig = JSON.stringify({sid: currentSession, flagged: flaggedOnly, list: visible, total: currentTotal, loaded: loadedCount});
+    : scoped;
+  const sig = JSON.stringify({sid: currentSession, tab: mainTab, kind: driftKindFilter, flagged: flaggedOnly, list: visible, total: currentTotal, loaded: loadedCount});
   if (sig === lastRecordsSig) return;
   lastRecordsSig = sig;
   if (visible.length === 0) {
-    root.innerHTML = '<div class="empty">' + (flaggedOnly
-      ? 'no flagged verdicts in this session'
-      : 'no records') + '</div>';
+    let msg;
+    if (mainTab === "drift") {
+      msg = driftKindFilter
+        ? `no drift of kind <code>${escapeHtml(driftKindFilter)}</code> in this session`
+        : 'no drift events in this session';
+    } else if (flaggedOnly) {
+      msg = 'no flagged verdicts in this session';
+    } else {
+      msg = 'no records';
+    }
+    root.innerHTML = '<div class="empty">' + msg + '</div>';
     return;
   }
   // Newest first
@@ -944,6 +1147,185 @@ async function loadTrailSnap(sha, targetId) {
   if (el) el.textContent = text;
 }
 
+async function fetchTrailSnapshot(sha) {
+  if (!sha) return null;
+  // Cache by (session, sha) so tab-switching is free.
+  if (cachedTrailSnapshot.sid === currentSession
+      && cachedTrailSnapshot.sha === sha
+      && cachedTrailSnapshot.data) {
+    return cachedTrailSnapshot.data;
+  }
+  try {
+    const r = await fetch("/api/trail_snapshot/" + encodeURIComponent(sha));
+    if (!r.ok) return null;
+    const text = await r.text();
+    const data = JSON.parse(text);
+    cachedTrailSnapshot = { sid: currentSession, sha, data };
+    return data;
+  } catch (e) {
+    console.error("trail snapshot fetch failed", e);
+    return null;
+  }
+}
+
+function suppressionExplain(reason) {
+  // Map the trail.py skipped_reason strings to human-readable WHY
+  // labels. The strings come from trail.py _apply_payload so this
+  // mapping is the single source of truth for "what does this mean".
+  if (!reason) return "";
+  const r = String(reason).toLowerCase();
+  if (r.includes("without citations")) {
+    return "model claimed drift but cited no breadcrumb indexes — likely a hallucination";
+  }
+  if (r.includes("same kind")) {
+    return "this drift_kind already fired in the last 3 events — K-window repetition rule";
+  }
+  if (r.includes("no payload")) {
+    return "model didn't call update_trail or its call malformed";
+  }
+  return reason;
+}
+
+async function renderTimeline() {
+  const el = document.getElementById("timeline");
+  const trails = trailRecords();
+  if (trails.length === 0) {
+    el.innerHTML = '<div class="timeline-empty">No trail events recorded in this session yet. '
+      + 'Either trail is disabled (<code>GADFLY_TRAIL=0</code>), the session predates this module, '
+      + 'or no PostToolUse has fired for a watched tool.</div>';
+    return;
+  }
+  // Latest record carries the full breadcrumb history via its new_trail_sha.
+  const latest = trails[trails.length - 1];
+  const sha = latest && latest.new_trail_sha;
+  if (!sha) {
+    el.innerHTML = '<div class="timeline-empty">Trail events exist but the latest snapshot SHA is missing. '
+      + 'Try refreshing — the snapshot may not have been written yet.</div>';
+    return;
+  }
+  // Show a quick loading note while the snapshot fetches — most fetches
+  // are <50ms but on a cold network this avoids a confusing blank panel.
+  el.innerHTML = '<div class="timeline-empty">loading trail snapshot…</div>';
+  const snap = await fetchTrailSnapshot(sha);
+  // Tab may have changed while fetching.
+  if (mainTab !== "trail") return;
+  if (!snap) {
+    el.innerHTML = '<div class="timeline-empty">Failed to load trail snapshot ' + escapeHtml(sha) + '.</div>';
+    return;
+  }
+  const breadcrumbs = Array.isArray(snap.breadcrumbs) ? snap.breadcrumbs : [];
+  const driftFlags = Array.isArray(snap.drift_flags) ? snap.drift_flags : [];
+  // Stats top-line.
+  const levels = {};
+  for (const b of breadcrumbs) {
+    const l = b.abstraction_level || "unclear";
+    levels[l] = (levels[l] || 0) + 1;
+  }
+  const delivered = driftFlags.filter(d => d.delivered_to_agent).length;
+  const suppressed = driftFlags.length - delivered;
+  const statsBits = [
+    `<span class="stat"><b>${breadcrumbs.length}</b> breadcrumbs</span>`,
+  ];
+  for (const lvl of ["instance", "class", "architecture", "rationalization", "unclear"]) {
+    if (levels[lvl]) statsBits.push(`<span class="stat">${lvl}: <b>${levels[lvl]}</b></span>`);
+  }
+  statsBits.push(`<span class="stat"><b>${driftFlags.length}</b> drift</span>`);
+  if (delivered > 0) statsBits.push(`<span class="stat" style="color:#6fcf97;">${delivered} delivered</span>`);
+  if (suppressed > 0) statsBits.push(`<span class="stat" style="color:var(--muted);">${suppressed} suppressed</span>`);
+  if (typeof snap.non_advance_streak === "number" && snap.non_advance_streak > 0) {
+    statsBits.push(`<span class="stat" style="color:var(--warn);">streak: ${snap.non_advance_streak}</span>`);
+  }
+  // Index drift_flags by their highest cited action_index so we can
+  // splice them into the timeline at the right spot (the breadcrumb
+  // the drift was DETECTED FROM, not the breadcrumb being judged).
+  // When cited list is empty, attach to the drift's own action_index.
+  const driftsByAnchor = {};
+  for (const d of driftFlags) {
+    if (driftKindFilter && d.drift_kind !== driftKindFilter) continue;
+    const cites = Array.isArray(d.cited_action_indexes) ? d.cited_action_indexes : [];
+    const anchor = cites.length ? Math.max(...cites) : (d.action_index || 0);
+    if (!driftsByAnchor[anchor]) driftsByAnchor[anchor] = [];
+    driftsByAnchor[anchor].push(d);
+  }
+  // Compose timeline. Each breadcrumb is a node; drift markers follow
+  // the breadcrumb whose action_index matches the anchor.
+  const parts = [];
+  parts.push('<div class="timeline-stats">' + statsBits.join("") + '</div>');
+  parts.push('<div class="timeline-rail">');
+  for (const b of breadcrumbs) {
+    const lvl = b.abstraction_level || "unclear";
+    parts.push(`
+      <div class="timeline-node lvl-${lvl}">
+        <div class="crumb-head">
+          <span class="ai">#${b.action_index ?? '?'}</span>
+          <span class="lvl ${lvl}">${escapeHtml(lvl)}</span>
+        </div>
+        <div class="text">${escapeHtml(b.breadcrumb_text || '')}</div>
+        ${b.action_summary ? `<div class="action">${escapeHtml(b.action_summary)}</div>` : ''}
+      </div>
+    `);
+    const drifts = driftsByAnchor[b.action_index];
+    if (drifts) {
+      for (const d of drifts) {
+        parts.push(renderTimelineDrift(d));
+      }
+    }
+  }
+  // Drift events whose anchor never matched any breadcrumb (e.g.
+  // synthesized seed didn't include the cited indexes) — surface them
+  // at the END so they aren't silently dropped.
+  const matchedAnchors = new Set(breadcrumbs.map(b => b.action_index));
+  for (const [anchorStr, drifts] of Object.entries(driftsByAnchor)) {
+    if (matchedAnchors.has(Number(anchorStr))) continue;
+    for (const d of drifts) {
+      parts.push(renderTimelineDrift(d, /* orphan */ true));
+    }
+  }
+  parts.push('</div>');
+  el.innerHTML = parts.join("");
+}
+
+function renderTimelineDrift(d, orphan) {
+  const kind = d.drift_kind || "other";
+  const sup = !!d.suppressed;
+  const deliv = !!d.delivered_to_agent;
+  const cites = Array.isArray(d.cited_action_indexes) ? d.cited_action_indexes : [];
+  const question = trailDriftQuestion(kind);
+  const supBadge = sup ? '<span class="badge suppressed">suppressed</span>' : '';
+  const delBadge = deliv ? '<span class="badge delivered">delivered</span>' : '';
+  const orphanNote = orphan ? '<span style="color:var(--muted);font-size:10.5px;margin-left:6px;">(orphan: cites point outside the trail)</span>' : '';
+  // For suppressed drifts, surface WHY via the canonical reason map.
+  // Trail snapshots don't carry skipped_reason directly (it lives in
+  // the audit-log record), so we approximate by combining the rule
+  // categories that could have fired.
+  let supExplain = "";
+  if (sup) {
+    // Heuristic: empty cites → "no citations" rule; otherwise → K-window.
+    const cause = cites.length === 0
+      ? "model claimed drift but cited no breadcrumb indexes — likely a hallucination"
+      : "this drift_kind already fired in the last 3 events — K-window repetition rule";
+    supExplain = `<div class="reason"><b>suppressed because:</b> ${cause}</div>`;
+  }
+  return `
+    <div class="timeline-drift-marker ${sup ? 'suppressed' : ''}">
+      <div class="head">
+        <span class="kind">${escapeHtml(kind)}</span>
+        ${supBadge}
+        ${delBadge}
+        <span class="ai">#${d.action_index ?? '?'}</span>
+        ${orphanNote}
+      </div>
+      ${d.drift_reasoning ? `<div class="reason"><b>audit:</b> ${escapeHtml(d.drift_reasoning)}</div>` : ''}
+      ${cites.length ? `<div class="cites">cites: ${cites.map(c => '#' + c).join(', ')}</div>` : ''}
+      ${supExplain}
+      <details>
+        <summary>${deliv ? 'Question delivered to the agent' : 'Question that would have been delivered'}</summary>
+        <div class="question">${escapeHtml(question)}</div>
+      </details>
+    </div>
+  `;
+}
+
 // Canonical Socratic questions delivered to the supervised agent when a
 // drift_kind fires. Mirror of `prompts.TRAIL_DRIFT_QUESTIONS` in Python.
 // Kept here so the viewer can render the verbatim text that reached the
@@ -1016,7 +1398,7 @@ function renderTrailEvent(r) {
           ${diff.map(d => `<li>${escapeHtml(d)}</li>`).join('')}
         </ul>
       </div>`;
-  const skippedHtml = r.skipped_reason
+  const skippedHtml = r.skipped_reason && !drift
     ? `<div class="journal-skipped">${escapeHtml(r.skipped_reason)}</div>`
     : '';
   const errHtml = failed
@@ -1030,6 +1412,12 @@ function renderTrailEvent(r) {
       ? '<span class="badge suppressed">suppressed</span>' : '';
     const delBadge = delivered
       ? '<span class="badge delivered">delivered</span>' : '';
+    // When suppressed, surface WHY in human terms. The audit log
+    // carries skipped_reason verbatim from trail.py; we map it via
+    // `suppressionExplain` to plain English.
+    const supReason = (suppressed && r.skipped_reason)
+      ? `<div class="suppress-reason"><b>suppressed because:</b> ${escapeHtml(suppressionExplain(r.skipped_reason))}</div>`
+      : '';
     driftHtml = `
       <div class="trail-drift-banner">
         <div>
@@ -1037,6 +1425,7 @@ function renderTrailEvent(r) {
           ${supBadge}
           ${delBadge}
         </div>
+        ${supReason}
         <div class="question">${escapeHtml(question)}</div>
       </div>`;
   }
@@ -1298,6 +1687,11 @@ function tickRefresh() {
 
 // Restore toggle state visually before first render.
 if (flaggedOnly) document.getElementById("flagged-toggle").classList.add("on");
+// Restore main-tab visual state (mainTab itself was loaded from
+// localStorage above; the active class needs to follow).
+for (const el of document.querySelectorAll(".tabs-main .tab-main")) {
+  el.classList.toggle("active", el.dataset.tab === mainTab);
+}
 
 // Delegated handler — every <details> in the records pane reports its
 // open/close state into the openDetails set so the next re-render keeps it.

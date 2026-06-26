@@ -195,3 +195,110 @@ def test_index_html_served_on_root(viewer_server: str):
     assert code == 200
     assert "<!doctype html>" in body.lower()
     assert "gadfly" in body
+
+
+# --- trail viewer features --------------------------------------------------
+
+
+def test_api_sessions_counts_trail_events_and_drifts(tmp_log_dir: Path, viewer_server: str):
+    """Trail records are counted separately from verdicts. The sidebar
+    badge `N trail · M drift` reads `trail_events` and `trail_drifts`."""
+    _seed(
+        tmp_log_dir,
+        "trail-sess",
+        [
+            {"type": "verdict", "ts": 1.0, "tool_name": "Edit",
+             "verdict": {"professional": True}},
+            {"type": "trail_update", "ts": 2.0, "action_index": 1,
+             "advances_trail": True, "drift_detected": False,
+             "drift_kind": None, "suppressed": False,
+             "delivered_to_agent": False},
+            {"type": "trail_update", "ts": 3.0, "action_index": 2,
+             "advances_trail": False, "drift_detected": True,
+             "drift_kind": "hardcoded_instance", "suppressed": False,
+             "delivered_to_agent": True},
+            {"type": "trail_update", "ts": 4.0, "action_index": 3,
+             "advances_trail": False, "drift_detected": True,
+             "drift_kind": "hardcoded_instance", "suppressed": True,
+             "delivered_to_agent": False},
+        ],
+    )
+    data = _get_json(viewer_server + "/api/sessions")
+    s = next(s for s in data if s["id"] == "trail-sess")
+    # 1 verdict, 3 trail events, 2 of which are drift (one delivered, one suppressed)
+    assert s["count"] == 1
+    assert s["trail_events"] == 3
+    assert s["trail_drifts"] == 2
+    # Newest record was a trail event → last_tool reflects that.
+    assert s["last_tool"] == "trail"
+
+
+def test_api_sessions_zero_trail_keys_present_when_absent(tmp_log_dir: Path, viewer_server: str):
+    """Sessions with no trail events still expose `trail_events: 0` so the
+    JS template doesn't see `undefined` and render `undefined trail`."""
+    _seed(
+        tmp_log_dir,
+        "no-trail",
+        [{"ts": 1.0, "tool_name": "Edit",
+          "verdict": {"professional": True}}],
+    )
+    data = _get_json(viewer_server + "/api/sessions")
+    s = next(s for s in data if s["id"] == "no-trail")
+    assert s["trail_events"] == 0
+    assert s["trail_drifts"] == 0
+
+
+def test_api_trail_snapshot_roundtrip(tmp_log_dir: Path, viewer_server: str):
+    """The viewer reads trail snapshots from a SHA-content-addressed store
+    (mirroring the journal). `/api/trail_snapshot/<sha>` returns the
+    snapshot pretty-printed."""
+    snap_json = json.dumps({
+        "breadcrumbs": [
+            {"action_index": 1, "breadcrumb_text": "added catalog",
+             "abstraction_level": "class", "action_summary": "Edit(hazards.go)",
+             "ts": 1.0},
+        ],
+        "drift_flags": [],
+        "action_index": 1,
+        "prompt_sha": "abc",
+        "schema_version": 1,
+        "non_advance_streak": 0,
+        "last_root_goal": "build hazard",
+        "ts": 1.5,
+    }, sort_keys=True, ensure_ascii=False)
+    sha = audit_log.ensure_trail_snapshot(snap_json)
+    code, body = _get_text(viewer_server + f"/api/trail_snapshot/{sha}")
+    assert code == 200
+    parsed = json.loads(body)
+    assert parsed["breadcrumbs"][0]["abstraction_level"] == "class"
+    assert parsed["action_index"] == 1
+
+
+def test_api_trail_snapshot_unknown_is_404(viewer_server: str):
+    code, _ = _get_text(viewer_server + "/api/trail_snapshot/deadbeef")
+    assert code == 404
+
+
+def test_index_html_includes_trail_ui(viewer_server: str):
+    """Smoke-test that the trail UI shipped: tabs, timeline panel,
+    drift-summary container, and the drift-question table the
+    timeline renderer reads from."""
+    code, body = _get_text(viewer_server + "/")
+    assert code == 200
+    # Main-pane tabs
+    assert 'id="main-tabs"' in body
+    assert 'data-tab="trail"' in body
+    assert 'data-tab="drift"' in body
+    # Timeline panel container
+    assert 'id="timeline"' in body
+    # Drift-summary chips container
+    assert 'id="drift-summary"' in body
+    # JS renderer entry points
+    assert "function renderTimeline" in body
+    assert "function renderTimelineDrift" in body
+    assert "function renderDriftSummary" in body
+    assert "function toggleDriftKindFilter" in body
+    # Canonical-question lookup table for the timeline
+    assert "TRAIL_DRIFT_QUESTIONS" in body
+    # Suppression-explainer (so suppressed drifts don't read as opaque)
+    assert "function suppressionExplain" in body
