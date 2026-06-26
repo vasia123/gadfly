@@ -12,6 +12,15 @@ pull out the three things the watchdog needs:
 The transcript schema is not formally documented and varies between Claude
 Code versions, so this module parses defensively: anything malformed is
 skipped, and missing context degrades to None / empty list rather than raising.
+
+Sidechain filtering: when the main agent spawns a sub-agent via the `Task`
+tool, all of the sub-agent's messages land in the same JSONL file but
+carry `isSidechain: true`. Gadfly supervises the main agent only — sub-
+agent actions would be noise (they're often Read/grep heavy reconnaissance
+inside a delegated task). `load()` strips sidechain entries ONCE, right
+after JSON parse, so every downstream walker sees main-agent actions only.
+External callers of `extract_*` helpers (tests, scripts) pass synthetic
+entries that don't carry the field and are unaffected.
 """
 
 from __future__ import annotations
@@ -81,6 +90,10 @@ class SessionContext:
     # context of what came back from earlier ones. Each entry:
     # (action_index, command, exit_code, stdout, stderr).
     recent_bash_actions: list[tuple[int, str, Any, str, str]] = field(default_factory=list)
+    # The session trail as loaded after trail.update_for_action ran.
+    # None when GADFLY_TRAIL=0 or the call failed. Populated by hook.py;
+    # the viewer reads it back via the trail audit-log records.
+    trail: Any = None
 
     @property
     def last_user_request(self) -> str | None:
@@ -200,9 +213,18 @@ def load(
                 if not line:
                     continue
                 try:
-                    entries.append(json.loads(line))
+                    entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # Sidechain == sub-agent (spawned via Task). Gadfly tracks
+                # the main agent only; sub-agent actions would dilute the
+                # trail and confuse the journal. Stripped here, ONCE — every
+                # downstream walker (extract_pairs, recent_actions,
+                # file_touch_trajectory, recent_bash_actions, snapshots,
+                # active_plan) reads main-agent entries only.
+                if isinstance(entry, dict) and entry.get("isSidechain"):
+                    continue
+                entries.append(entry)
     except OSError:
         return ctx
 

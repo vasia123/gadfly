@@ -36,3 +36,9 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Phase-B (historian priors) default-on in production. Off in
     # unit tests so prompts don't get unexpected priors blocks.
     monkeypatch.setenv("GADFLY_HISTORIAN_PRIORS", "0")
+    # Trail (longitudinal breadcrumb path) is default-on in production.
+    # Off in unit tests so hook-level tests can assert single-record
+    # audit logs; tests that exercise the trail flow set GADFLY_TRAIL=1
+    # explicitly (and mock run_query the way test_trail.py does).
+    monkeypatch.setenv("GADFLY_TRAIL", "0")
+    monkeypatch.setenv("GADFLY_TRAIL_FEEDBACK", "0")

@@ -33,11 +33,79 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from gadfly import session as session_mod  # noqa: E402
+from gadfly import trail as trail_mod  # noqa: E402
 from gadfly.backends import select_backend  # noqa: E402
 from gadfly.watchdog import evaluate_async, DEFAULT_MODEL  # noqa: E402
 
 DEFAULT_POSITIVE = ROOT / "tests" / "fixtures" / "watchdog_corpus" / "cases.json"
 DEFAULT_NEGATIVE = ROOT / "tests" / "fixtures" / "watchdog_corpus" / "cases_negative.json"
+DEFAULT_WRONG_LEVEL = (
+    ROOT / "tests" / "fixtures" / "wrong_level_corpus" / "cases.json"
+)
+
+
+_RECON_BASH_TOKENS = (
+    "grep ", "rg ", "ls ", "find ", "cat ", "head ", "tail ", "wc ",
+    "git status", "git log", "git diff", "git blame", "git show",
+)
+
+
+def _seed_abstraction_level(action_summary: str) -> str:
+    """Heuristic classifier for synthesized seed breadcrumbs.
+
+    Edits and Writes are concrete commits — `instance` is the right
+    starting level (the rubric only escalates to drift when MULTIPLE
+    instance-level breadcrumbs accumulate, which is precisely what
+    `hardcoded_instance` looks for).
+
+    Reconnaissance tool calls (Read, grep/ls/find via Bash, git
+    status/log) are `unclear` — they advance no commit. The trail's
+    `recon_as_work` pattern fires when ≥5 of these stack up.
+
+    Without this classifier the seed defaulted to all-unclear which
+    triggered recon_as_work on every case regardless of the actual
+    action shape.
+    """
+    if not action_summary:
+        return "unclear"
+    s = action_summary.strip()
+    if s.startswith(("Edit(", "Write(", "MultiEdit(")):
+        return "instance"
+    if s.startswith("Read("):
+        return "unclear"
+    if s.startswith("Bash:"):
+        rest = s[len("Bash:"):].strip().lower()
+        if any(rest.startswith(tok) for tok in _RECON_BASH_TOKENS):
+            return "unclear"
+        # Build / test / migrate / install — treat as instance commit.
+        return "instance"
+    return "unclear"
+
+
+def _seed_trail_from_actions(recent_actions: list[str]) -> trail_mod.Trail:
+    """Manufacture a synthetic trail from a case's `recent_actions` list.
+
+    The corpus cases predate the trail module — they have no real
+    breadcrumb history. To exercise the trail rubric on them we synthesize
+    a seed: one breadcrumb per prior action, with abstraction_level
+    inferred from the action shape (see `_seed_abstraction_level`).
+
+    The level is load-bearing for the rubric's longitudinal pattern
+    rules — flat-unclear seeds trigger recon_as_work on every case.
+    """
+    seed = trail_mod.empty_trail()
+    for i, a in enumerate(recent_actions[-trail_mod.PROMPT_WINDOW:], start=1):
+        seed.breadcrumbs.append(
+            trail_mod.Breadcrumb(
+                action_index=i,
+                breadcrumb_text=(a or "")[:160],
+                abstraction_level=_seed_abstraction_level(a or ""),
+                action_summary=(a or "")[:240],
+                ts=0.0,
+            )
+        )
+    seed.action_index = len(recent_actions)
+    return seed
 
 
 def _ctx_from_dict(d: dict) -> session_mod.SessionContext:
@@ -80,24 +148,85 @@ async def _run_case(case: dict, model: str, timeout_s: float, max_turns: int,
     return res, dt
 
 
+def _summarize_case_action(case: dict) -> str:
+    """One-line summary of the case's trigger action, for the trail prompt."""
+    tn = case.get("tool_name") or "?"
+    ti = case.get("tool_input") or {}
+    if tn == "Edit":
+        fp = ti.get("file_path", "?")
+        return (
+            f"Edit({fp})\n  -: {(ti.get('old_string') or '')[:180]}"
+            f"\n  +: {(ti.get('new_string') or '')[:180]}"
+        )
+    if tn == "Write":
+        return f"Write({ti.get('file_path', '?')})"
+    if tn == "MultiEdit":
+        return f"MultiEdit({ti.get('file_path', '?')}, {len(ti.get('edits') or [])} edits)"
+    if tn == "Bash":
+        return f"Bash: {(ti.get('command') or '')[:240]}"
+    return tn
+
+
+async def _run_case_trail(
+    case: dict, model: str, timeout_s: float, backend
+):
+    """Trail-mode replay. Seeds a synthetic trail from recent_actions,
+    saves it under the case_id as session_id, then calls
+    trail.update_for_action so the model sees the prior path + the
+    current action and decides drift.
+
+    Returns (TrailUpdateResult, elapsed_seconds).
+    """
+    ctx = _ctx_from_dict(case["session_context"])
+    sid = f"corpus_{case['case_id']}"
+    # Seed: synthesize prior breadcrumbs from recent_actions.
+    seed = _seed_trail_from_actions(ctx.recent_actions)
+    trail_mod.save_current(sid, seed)
+    t0 = time.monotonic()
+    res = await trail_mod.update_for_action_async(
+        session_id=sid,
+        action_index=(ctx.action_index or 0) + 1,
+        action_summary=_summarize_case_action(case),
+        assistant_reasoning=ctx.last_assistant_plan,
+        latest_user_message=(
+            ctx.recent_user_requests[-1]
+            if ctx.recent_user_requests else None
+        ),
+        journal_root_goal=None,  # corpus has no journal state
+        cwd=case.get("cwd") or None,
+        model=model,
+        timeout_s=timeout_s,
+        backend=backend,
+    )
+    dt = time.monotonic() - t0
+    return res, dt
+
+
 def _short(s: str, n: int = 140) -> str:
     s = (s or "").strip().replace("\n", " ")
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
 async def main_async(args):
-    cases_path = Path(args.cases) if args.cases else (
-        DEFAULT_NEGATIVE if args.negative else DEFAULT_POSITIVE
-    )
+    if args.cases:
+        cases_path = Path(args.cases)
+    elif args.wrong_level:
+        cases_path = DEFAULT_WRONG_LEVEL
+    elif args.negative:
+        cases_path = DEFAULT_NEGATIVE
+    else:
+        cases_path = DEFAULT_POSITIVE
     if not cases_path.exists():
         print(f"ERROR: cases file not found: {cases_path}", file=sys.stderr)
         sys.exit(2)
     cases = json.loads(cases_path.read_text(encoding="utf-8"))
-    # Auto-detect mode from first case if not forced by --negative
-    corpus_mode = (
-        "negative" if (args.negative or (cases and cases[0].get("mode") == "negative"))
-        else "positive"
-    )
+    # Auto-detect mode from first case if not forced by --negative.
+    # wrong_level corpus cases carry mode="wrong_level_positive"; their
+    # success criterion matches the positive corpus (model must flag).
+    if args.negative or (cases and cases[0].get("mode") == "negative"):
+        corpus_mode = "negative"
+    else:
+        corpus_mode = "positive"
     if args.only:
         cases = [c for c in cases if c["case_id"] == args.only]
         if not cases:
@@ -154,18 +283,68 @@ async def main_async(args):
     for i, case in enumerate(cases):
         cid = case["case_id"]
         try:
-            res, dt = await _run_case(
-                case, args.model, args.timeout, args.max_turns, backend=backend,
-            )
+            if args.rubric == "trail":
+                tres, dt = await _run_case_trail(
+                    case, args.model, args.timeout, backend=backend,
+                )
+            else:
+                res, dt = await _run_case(
+                    case, args.model, args.timeout, args.max_turns,
+                    backend=backend,
+                )
         except Exception as exc:
             print(f"[{i:02d}] {cid:25s} ERROR {exc!r}")
             n_error += 1
             results.append({"case_id": cid, "status": "error", "error": repr(exc)})
             continue
-        flagged = res.verdict.professional is False
-        # Positive corpus: success = model RE-FIRES the catch (flagged=True).
-        # Negative corpus: success = model STAYS SILENT (flagged=False),
-        #   matching the agent's pushback that the original flag was wrong.
+
+        # Reduce the rubric to a single "flagged?" boolean so the
+        # success/failure logic is shared between rubrics.
+        if args.rubric == "trail":
+            flagged = (
+                tres.drift_flag is not None
+                and tres.drift_flag.delivered_to_agent
+            )
+            verdict_reason_text = (
+                tres.drift_flag.drift_reasoning
+                if tres.drift_flag else "(silent)"
+            )
+            verdict_suggestion_text = (
+                trail_mod.question_for_kind(tres.drift_flag.drift_kind)
+                if tres.drift_flag else ""
+            )
+            verdict_professional = not flagged
+            raw_args = {
+                "advances_trail": (
+                    len(tres.trail.breadcrumbs) >
+                    len(_seed_trail_from_actions(
+                        _ctx_from_dict(case["session_context"]).recent_actions
+                    ).breadcrumbs)
+                ),
+                "drift_detected": tres.drift_flag is not None,
+                "drift_kind": (
+                    tres.drift_flag.drift_kind if tres.drift_flag else None
+                ),
+                "cited_action_indexes": (
+                    list(tres.drift_flag.cited_action_indexes)
+                    if tres.drift_flag else []
+                ),
+                "suppressed": (
+                    bool(tres.drift_flag.suppressed)
+                    if tres.drift_flag else False
+                ),
+            }
+            err = tres.error
+        else:
+            flagged = res.verdict.professional is False
+            verdict_reason_text = res.verdict.reason or "(silent)"
+            verdict_suggestion_text = res.verdict.suggestion
+            verdict_professional = res.verdict.professional
+            raw_args = res.raw_verdict_args
+            err = res.error
+
+        # Positive corpus: success = model FIRES (flagged=True).
+        # Negative corpus: success = model STAYS SILENT (flagged=False).
         if corpus_mode == "negative":
             ok = (not flagged)
             marker = "✓ SILENT" if ok else "✗ FLAGGED"
@@ -182,19 +361,19 @@ async def main_async(args):
         print(f"[{i:02d}] {cid:25s} {marker}  {cwd_tail:14s} {dt:5.1f}s")
         orig = case["expected"]["original_reason"]
         print(f"     orig: {_short(orig, 130)}")
-        print(f"     new : {_short(res.verdict.reason or '(silent)', 130)}")
-        if res.error:
-            print(f"     ERR : {res.error}")
+        print(f"     new : {_short(verdict_reason_text, 130)}")
+        if err:
+            print(f"     ERR : {err}")
         results.append({
             "case_id": cid,
             "status": status,
-            "verdict_professional": res.verdict.professional,
-            "verdict_reason": res.verdict.reason,
-            "verdict_suggestion": res.verdict.suggestion,
-            "raw_verdict_args": res.raw_verdict_args,
+            "verdict_professional": verdict_professional,
+            "verdict_reason": verdict_reason_text,
+            "verdict_suggestion": verdict_suggestion_text,
+            "raw_verdict_args": raw_args,
             "original_reason": orig,
             "latency_s": round(dt, 2),
-            "error": res.error,
+            "error": err,
         })
 
     print("=" * 100)
@@ -253,6 +432,22 @@ def main():
         help="Run negative-corpus mode: success = model stays silent "
              "(matches the agent's pushback that the original flag was wrong). "
              "Loads cases_negative.json by default; overridable via --cases.",
+    )
+    p.add_argument(
+        "--wrong-level", action="store_true",
+        help="Run wrong_level corpus (dnd-llm pushbacks). Positive-mode "
+             "scoring (success = model flags). Loads "
+             "tests/fixtures/wrong_level_corpus/cases.json; overridable "
+             "via --cases.",
+    )
+    p.add_argument(
+        "--rubric", choices=("verdict", "trail"), default="verdict",
+        help="Which rubric to exercise. `verdict` (default) = the watchdog "
+             "professional/reason verdict. `trail` = trail.update_for_action "
+             "synthesizing a seed trail from recent_actions and asking for "
+             "drift on the trigger action. For trail mode, success = "
+             "drift_detected (positive/wrong_level corpora) or no drift "
+             "(negative corpus).",
     )
     p.add_argument("--cases", default=None,
                    help="Override cases file path. Default depends on --negative.")

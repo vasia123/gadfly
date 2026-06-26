@@ -36,6 +36,17 @@ src/gadfly/
                   ~/.claude/gadfly/journal/<session_id>.json (current)
                   ~/.claude/gadfly/journals/<sha>.json (snapshots)
                 See "The journal" section below.
+  trail.py      Per-session conceptual breadcrumb trail (the main
+                agent's PATH, as opposed to journal's STATE). 7-cluster
+                drift taxonomy keyed for Einstein 3-level rule. ONE LLM
+                call per PostToolUse decides advances_trail +
+                drift_detected. async core (update_for_action_async)
+                + sync wrapper (update_for_action) for the hook.
+                Persistence:
+                  ~/.claude/gadfly/trail/<session_id>.json (current)
+                  ~/.claude/gadfly/trails/<sha>.json (snapshots)
+                Audit log type: trail_update. See "The trail" section
+                below.
   pairs.py      Pair / clean_user_text / extract_pairs — single source
                 of truth for transcript scrubbing.
   project_state.py
@@ -71,12 +82,22 @@ src/gadfly/
                 chronological list for journal), action_index, and
                 journal (populated by hook.py in Phase 2).
   hook.py       PostToolUse entrypoint. python -m gadfly.hook.
-                Runs journal.update_for_action() BEFORE
-                watchdog.evaluate(), then writes a heartbeat for the
-                historian. GADFLY_JOURNAL=0 disables the journal;
-                GADFLY_JOURNAL_VERDICT=0 rolls back to legacy verdict
-                prompt; GADFLY_HISTORIAN=0 disables heartbeats;
-                GADFLY_HISTORIAN_PRIORS=0 disables priors injection.
+                Runs journal.update_for_action() AND
+                trail.update_for_action() BEFORE watchdog.evaluate(),
+                then writes a heartbeat for the historian.
+                  GADFLY_JOURNAL=0           disable journal
+                  GADFLY_JOURNAL_VERDICT=0   legacy verdict prompt
+                  GADFLY_HISTORIAN=0         disable heartbeats
+                  GADFLY_HISTORIAN_PRIORS=0  disable priors injection
+                  GADFLY_TRAIL=0             disable trail
+                  GADFLY_TRAIL_FEEDBACK=1    surface drift questions
+                  GADFLY_SHADOW=1            full audit log, ZERO
+                                             agent-facing output
+                                             (validate trail before
+                                             going live)
+                Sub-agent actions (Task) are filtered upstream in
+                session.load() via the `isSidechain` JSONL field; the
+                hook itself never sees them.
   verdict.py    Verdict dataclass + to_hook_output()
   log.py        Append-only JSONL audit log + content-addressed
                 system prompts AND journal snapshots under
@@ -325,6 +346,127 @@ Default: ON. `GADFLY_HISTORIAN_PRIORS=0` rolls back.
   sees priors. Risk: false positives → noise. Wait for real-session
   evidence before enabling.
 - **Phase D:** `propose-claudemd` CLI — read-only, ships.
+
+## The trail (Phase 1 shadow default, Phase 2 opt-in)
+
+The journal owns *state* (workstreams, drift.observations). The trail
+owns *path* — the ordered conceptual breadcrumb sequence of the main
+agent. Different lens, same hook tick. Built because a class of laziness
+is invisible from a single action and only visible across multiple:
+
+- `hardcoded_instance` — N consecutive instance-level patches when a
+  class slot exists
+- `premature_ceiling`  — climbed instance→class, stopped before the
+  architecture slot
+- `wrong_layer`        — fix lands in the wrong architectural bucket
+- `rule_skip`          — repo has a rule (CLAUDE.md / active plan /
+  surrounding code), the agent bypassed it
+- `incomplete_coverage` — closed one branch of N obviously-equivalent
+- `recon_as_work`      — N consecutive reads/greps with no commit
+- `rationalization`    — re-explains a prior wrong-level fix instead
+  of correcting it
+
+These are the 7 longitudinal forms surfaced by 28 real `dnd-llm`
+pushbacks (corpus at `tests/fixtures/wrong_level_corpus/cases.json`).
+Single-action review can't see them; trail review can.
+
+### Architecture
+
+Same shape as the journal:
+- `Trail` dataclass holds `breadcrumbs` (capped 30) + `drift_flags`
+  (capped 40) + `non_advance_streak` + `last_root_goal`.
+- One LLM call per PostToolUse. Model decides:
+  (a) `advances_trail` — does this action change the conceptual stance?
+  (b) `drift_detected` — is one of the 7 patterns visible across the
+      last few breadcrumbs?
+- The model's output is structured (forced tool-call OR json_mode);
+  `drift_reasoning` is **audit only** — never shown to the agent.
+- On flag, the canonical Socratic question from
+  `prompts.TRAIL_DRIFT_QUESTIONS[kind]` reaches the agent. The model
+  doesn't author the question — it just signals which kind.
+- Persistence: `~/.claude/gadfly/trail/<session_id>.json` (current),
+  `~/.claude/gadfly/trails/<sha>.json` (snapshots). Audit log type:
+  `trail_update`.
+
+### Code-side guards (in `trail.py`, not the prompt)
+
+- **Stall guard.** 5 consecutive `advances_trail=false` → forced
+  `unclear` breadcrumb so detection doesn't go blind.
+- **Citation hygiene.** `drift_detected=true` with empty
+  `cited_action_indexes` → suppressed (model has no specific
+  breadcrumbs to point to, drift is likely hallucinated).
+- **K-window suppression.** Same `drift_kind` already fired in the
+  last 3 events → suppressed. This is the v1 echo-chamber defence;
+  do not weaken without testing on real sessions.
+- **Window reset on user redirect.** When `journal.root_goal` changed
+  between ticks (user redirected), the K-window suppression is
+  bypassed — past drift is moot for the new direction.
+
+### Sidechain filter
+
+Sub-agent actions (Task tool spawns) carry `isSidechain: true` in the
+transcript JSONL. Gadfly tracks the MAIN agent only. Filtered ONCE in
+`session.load()` immediately after JSON parse — every downstream walker
+(journal, trail, watchdog, viewer trajectory) sees main-agent entries
+only. Belt-and-braces: `tool_name == "Task"` is also not in
+`WATCHED_TOOLS`, so the Task call itself never reaches the hook.
+
+### Phases & env vars
+
+| env var                     | default | effect                                  |
+|-----------------------------|---------|-----------------------------------------|
+| `GADFLY_TRAIL`              | `1`     | trail runs on every PostToolUse         |
+| `GADFLY_TRAIL_FEEDBACK`     | `0`     | drift questions reach agent (Phase 2)   |
+| `GADFLY_SHADOW`             | `0`     | hook produces zero additionalContext    |
+
+Three phases:
+- **Phase 0 — full shadow.** `GADFLY_SHADOW=1`. Hook runs, audit log
+  fills with verdict + journal_update + trail_update records, viewer
+  renders everything. Agent sees nothing. Use this to eyeball trail
+  quality on real sessions BEFORE Phase 1.
+- **Phase 1 — trail shadow.** Default. Trail runs, drifts logged, but
+  `GADFLY_TRAIL_FEEDBACK=0` so trail questions don't reach the agent.
+  Watchdog verdict still goes through.
+- **Phase 2 — trail live.** `GADFLY_TRAIL_FEEDBACK=1`. Drift flags
+  surface as canonical Einstein questions in `additionalContext`.
+
+### Baselines (Ling-2.6-1T + openai_json, this corpus)
+
+|                | N  | flag-rate | metric                    |
+|----------------|----|-----------|---------------------------|
+| positive       | 24 | 100.0%    | recall                    |
+| wrong_level    | 28 |  96.4%    | recall                    |
+| negative       | 15 |  20.0%    | silence (precision-side)  |
+
+Combined: TP=51, FN=1, FP=12 → **precision=0.81, recall=0.98, F1=0.89**.
+Old baseline (verdict rubric Ling-1T + old prompt) was **F1=0.78**.
+
+Caveat: the negative corpus was built for the single-action wrong_level
+rubric. Trail flags it harder because looking across multiple actions
+sees patterns the original watchdog missed. A trail-calibrated negative
+corpus is overdue; the 80% false-flag rate on the existing one is at
+least partly a corpus calibration artifact, not a pure prompt bug.
+Don't chase the negative number with prompt tightening until the new
+corpus exists — that path leads to over-correction.
+
+### When to climb to Phase 2
+
+After:
+1. ≥1 hour of real Claude Code session under `GADFLY_SHADOW=1`,
+2. viewer trail cards eyeball-correct (right breadcrumbs at right
+   actions, drift detections agree with your reading),
+3. drift `cited_action_indexes` consistently point to plausible
+   evidence (not random indexes).
+
+Flip `GADFLY_SHADOW=0`, leave `GADFLY_TRAIL_FEEDBACK=0` — Phase 1.
+Watchdog goes live. If the watchdog volume is acceptable, flip
+`GADFLY_TRAIL_FEEDBACK=1` — Phase 2.
+
+If it isn't acceptable, the watchdog can also be silenced separately
+by removing `GADFLY_RUBRIC=wrong_level` from `.env` (the rubric that
+was found weakest in the prior round), or by setting
+`GADFLY_JOURNAL=0` to skip the journal+verdict latency entirely and
+keep ONLY the trail.
 
 ## Architectural decisions — and why
 

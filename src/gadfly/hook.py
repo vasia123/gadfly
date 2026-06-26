@@ -34,7 +34,7 @@ import time
 from typing import Any
 
 from . import log as audit_log
-from . import journal, project_state, session, watchdog
+from . import journal, project_state, session, trail, watchdog
 from .verdict import Verdict
 
 
@@ -373,6 +373,40 @@ def main() -> int:
                 # journal.update_for_action already logs its own errors.
                 pass
 
+        # Trail: longitudinal conceptual breadcrumbs. Independent of the
+        # journal (state vs. path lenses), runs on every PostToolUse, never
+        # raises. Default ON; rollback with GADFLY_TRAIL=0. Drift flags
+        # only reach the agent when GADFLY_TRAIL_FEEDBACK=1 (phase 2),
+        # which gates additionalContext composition below.
+        result_t = None
+        if os.environ.get("GADFLY_TRAIL", "1") == "1":
+            try:
+                latest_user = (
+                    ctx.recent_user_requests[-1]
+                    if ctx.recent_user_requests else None
+                )
+                journal_root = (
+                    result_j.journal.root_goal
+                    if result_j is not None else None
+                )
+                result_t = trail.update_for_action(
+                    session_id=session_id,
+                    action_index=ctx.action_index,
+                    action_summary=_summarize_action_for_journal(
+                        tool_name, tool_input
+                    ),
+                    assistant_reasoning=ctx.last_assistant_plan,
+                    latest_user_message=latest_user,
+                    journal_root_goal=journal_root,
+                    cwd=cwd or None,
+                )
+                ctx.trail = result_t.trail
+            except Exception:
+                # Trail must never break the hook. trail.update_for_action
+                # already swallows + audit-logs its own errors; this guard
+                # is belt-and-braces.
+                pass
+
         t0 = time.perf_counter()
         result = watchdog.evaluate(
             tool_name=tool_name,
@@ -428,6 +462,49 @@ def main() -> int:
                 joined = (prior + "\n\n" + phase_c_text) if prior else phase_c_text
                 hso["additionalContext"] = joined
                 hook_out["hookSpecificOutput"] = hso
+
+        # Trail drift flag (Phase 2 — gated by GADFLY_TRAIL_FEEDBACK=1).
+        # The trail layer decides deliverable (not suppressed); the hook
+        # decides whether to actually surface. The canonical Socratic
+        # question lives in `prompts.TRAIL_DRIFT_QUESTIONS` — the model's
+        # `drift_reasoning` is never sent to the agent.
+        trail_msg = ""
+        if (
+            os.environ.get("GADFLY_TRAIL_FEEDBACK", "0") == "1"
+            and result_t is not None
+            and result_t.drift_flag is not None
+            and result_t.drift_flag.delivered_to_agent
+        ):
+            try:
+                trail_msg = trail.question_for_kind(
+                    result_t.drift_flag.drift_kind
+                )
+            except Exception:
+                trail_msg = ""
+        if trail_msg:
+            if hook_out is None:
+                hook_out = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": trail_msg,
+                    }
+                }
+            else:
+                hso = hook_out.get("hookSpecificOutput", {}) or {}
+                prior = hso.get("additionalContext") or ""
+                joined = (prior + "\n\n" + trail_msg) if prior else trail_msg
+                hso["additionalContext"] = joined
+                hook_out["hookSpecificOutput"] = hso
+
+        # SHADOW mode: hook runs everything (journal, trail, watchdog) and
+        # writes the full audit trail to disk, but emits NOTHING to the
+        # agent's additionalContext. The viewer reads the audit log, so
+        # the user can eyeball the trail's "правильно ли срабатывает"
+        # before flipping to live feedback. Cost: same latency as live
+        # mode; benefit: zero behavioural side-effects on the agent while
+        # validating the rubric.
+        if os.environ.get("GADFLY_SHADOW", "0") == "1":
+            hook_out = None
 
         _emit_hook_output(hook_out)
 

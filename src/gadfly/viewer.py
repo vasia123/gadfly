@@ -37,6 +37,8 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
         flagged = 0
         goal_events = 0
         journal_events = 0
+        trail_events = 0
+        trail_drifts = 0
         latest_ts: float | None = None
         last_tool: str | None = None
         try:
@@ -66,6 +68,15 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                             latest_ts = ts
                             last_tool = "journal"
                         continue
+                    if rec_type == "trail_update":
+                        trail_events += 1
+                        if rec.get("drift_detected"):
+                            trail_drifts += 1
+                        ts = rec.get("ts")
+                        if isinstance(ts, (int, float)) and (latest_ts is None or ts > latest_ts):
+                            latest_ts = ts
+                            last_tool = "trail"
+                        continue
                     count += 1
                     if rec.get("verdict", {}).get("professional") is False:
                         flagged += 1
@@ -82,6 +93,8 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                 "flagged": flagged,
                 "goal_events": goal_events,
                 "journal_events": journal_events,
+                "trail_events": trail_events,
+                "trail_drifts": trail_drifts,
                 "latest_ts": latest_ts,
                 "last_tool": last_tool,
             }
@@ -339,6 +352,19 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_text(text, content_type="application/json; charset=utf-8")
             return
+        if path.startswith("/api/trail_snapshot/"):
+            sha = path[len("/api/trail_snapshot/"):]
+            text = audit_log.read_trail_snapshot(sha)
+            if text is None:
+                self._send_text("not found", status=404)
+                return
+            try:
+                parsed = json.loads(text)
+                pretty = json.dumps(parsed, ensure_ascii=False, indent=2)
+                self._send_text(pretty, content_type="application/json; charset=utf-8")
+            except Exception:
+                self._send_text(text, content_type="application/json; charset=utf-8")
+            return
         self._send_text("not found", status=404)
 
 
@@ -403,6 +429,34 @@ _INDEX_HTML = r"""<!doctype html>
   .journal-diff li.dropped { color: var(--bad); }
   .journal-diff li.status { color: var(--warn); }
   .journal-skipped { padding: 8px 14px; color: var(--muted); font-size: 12px; font-style: italic; }
+  /* Trail card — longitudinal breadcrumb event.
+     Color palette by abstraction_level: instance=red (low),
+     class=yellow (mid), architecture=green (high),
+     rationalization=gray (suspect), unclear=neutral. */
+  .card.trail { border-color: #2c3a4a; background: #131820; }
+  .card.trail .head .tool { color: #a8c4e0; }
+  .card.trail.lvl-instance { border-left: 3px solid #f08a8a; }
+  .card.trail.lvl-class { border-left: 3px solid #f0c674; }
+  .card.trail.lvl-architecture { border-left: 3px solid #6fcf97; }
+  .card.trail.lvl-rationalization { border-left: 3px solid #8a93a6; }
+  .card.trail.lvl-unclear { border-left: 3px solid #4a5468; }
+  .card.trail.drift { border-color: #6b3b3b; background: #1a1418; }
+  .trail-body { padding: 10px 14px; }
+  .trail-body .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+  .trail-crumb { display: flex; gap: 10px; align-items: baseline; font-size: 13px; padding: 2px 0; }
+  .trail-crumb .lvl-tag { font-family: "SF Mono", Menlo, monospace; font-size: 11px; padding: 1px 6px; border-radius: 3px; }
+  .trail-crumb .lvl-tag.instance { background: rgba(240,138,138,0.18); color: #f08a8a; }
+  .trail-crumb .lvl-tag.class { background: rgba(240,198,116,0.18); color: #f0c674; }
+  .trail-crumb .lvl-tag.architecture { background: rgba(111,207,151,0.18); color: #6fcf97; }
+  .trail-crumb .lvl-tag.rationalization { background: rgba(138,147,166,0.20); color: var(--muted); }
+  .trail-crumb .lvl-tag.unclear { background: rgba(74,84,104,0.30); color: #8a93a6; }
+  .trail-drift-banner { background: rgba(240,138,138,0.10); border-top: 1px solid #5a2727; padding: 10px 14px; }
+  .trail-drift-banner .kind { font-family: "SF Mono", Menlo, monospace; font-size: 11px; background: rgba(240,138,138,0.20); color: #f08a8a; padding: 2px 8px; border-radius: 3px; margin-right: 8px; }
+  .trail-drift-banner .badge { font-size: 10.5px; padding: 1px 6px; border-radius: 3px; margin-left: 4px; }
+  .trail-drift-banner .badge.suppressed { background: rgba(138,147,166,0.20); color: var(--muted); }
+  .trail-drift-banner .badge.delivered { background: rgba(111,207,151,0.18); color: #6fcf97; }
+  .trail-drift-banner .question { margin-top: 8px; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; padding: 8px 10px; background: rgba(0,0,0,0.20); border-radius: 4px; border: 1px solid var(--border); }
+  .trail-drift-banner .cites { margin-top: 6px; font-size: 11.5px; color: var(--muted); }
   .tabbar { display: flex; gap: 4px; padding: 8px 12px 0; border-bottom: 1px solid var(--border); background: var(--panel); }
   .tabbar .tab { padding: 7px 14px; cursor: pointer; color: var(--muted); border-radius: 6px 6px 0 0; user-select: none; }
   .tabbar .tab:hover { color: var(--text); }
@@ -604,6 +658,7 @@ function renderSessions() {
       <div class="meta">
         <span class="count">${s.count} verdicts</span>
         ${s.flagged > 0 ? `<span class="flagged">${s.flagged} flagged</span>` : ''}
+        ${(s.trail_events||0) > 0 ? `<span>${s.trail_events} trail${(s.trail_drifts||0) > 0 ? ' · '+s.trail_drifts+' drift' : ''}</span>` : ''}
         <span>${escapeHtml(s.last_tool || '')}</span>
       </div>
       <div class="meta">
@@ -662,6 +717,7 @@ function renderRecords(records) {
         (r.verdict && r.verdict.professional === false)
         || (r.type === "goal_distill" && r.error)  // failed goal events stay visible
         || (r.type === "journal_update" && (r.error || r.skipped_reason))
+        || (r.type === "trail_update" && (r.drift_detected || r.error))
       )
     : records;
   const sig = JSON.stringify({sid: currentSession, flagged: flaggedOnly, list: visible, total: currentTotal, loaded: loadedCount});
@@ -678,6 +734,7 @@ function renderRecords(records) {
   const cardsHtml = newestFirst.map(r => {
     if (r.type === "goal_distill") return renderGoalEvent(r);
     if (r.type === "journal_update") return renderJournalEvent(r);
+    if (r.type === "trail_update") return renderTrailEvent(r);
     const v = r.verdict || {};
     const pro = v.professional;
     const flagged = pro === false;
@@ -877,6 +934,138 @@ async function loadJournalSnap(sha, targetId) {
   const text = await r.text();
   const el = document.getElementById(targetId);
   if (el) el.textContent = text;
+}
+
+async function loadTrailSnap(sha, targetId) {
+  if (!sha) return;
+  const r = await fetch("/api/trail_snapshot/" + encodeURIComponent(sha));
+  const text = await r.text();
+  const el = document.getElementById(targetId);
+  if (el) el.textContent = text;
+}
+
+// Canonical Socratic questions delivered to the supervised agent when a
+// drift_kind fires. Mirror of `prompts.TRAIL_DRIFT_QUESTIONS` in Python.
+// Kept here so the viewer can render the verbatim text that reached the
+// agent without round-tripping through the API. When the Python side
+// changes, update this table to match (or auto-fetch via /api).
+const TRAIL_DRIFT_QUESTIONS = {
+  hardcoded_instance:
+    "The instance you just fixed — it's a specific case of WHAT? Name the CLASS. " +
+    "Where in the codebase does that class already have a slot? If the slot exists — " +
+    "route the next patch through it. If not — create one before adding the next patch.",
+  premature_ceiling:
+    "You climbed one abstraction level (instance → class) and stopped. " +
+    "What level above the class would the architectural fix live at? " +
+    "Does that slot already exist? If yes — why are you patching class-level " +
+    "instead of routing through architecture?",
+  wrong_layer:
+    "The thing you just changed — what is its responsibility (presentation / domain / " +
+    "persistence / scheduling / classification)? Which layer owns the bug? " +
+    "If they don't match — what does moving the fix to the right layer cost?",
+  rule_skip:
+    "The action bypasses a rule, convention, or contract visible in this project. " +
+    "Name the rule. Did you deviate for a reason, or because the bypass was more convenient?",
+  incomplete_coverage:
+    "The last action closed ONE branch of a larger equivalent set. " +
+    "What are the other members of its class? Will the fix cover them?",
+  recon_as_work:
+    "Several actions have been reading/grepping/diagnostics — no code committed. " +
+    "What concrete BUILD step have you committed in the last few moves? " +
+    "If none — do you have enough context to commit one now?",
+  rationalization:
+    "Your reasoning looks like a post-hoc justification of a prior wrong-level step. " +
+    "Which action are you defending? Would a senior reviewer accept it at face value?",
+  other:
+    "This action triggered a longitudinal three-level check. " +
+    "Stop and reflect: instance you fixed → class it belongs to → architecture slot."
+};
+
+function trailDriftQuestion(kind) {
+  return TRAIL_DRIFT_QUESTIONS[kind] || TRAIL_DRIFT_QUESTIONS.other;
+}
+
+function renderTrailEvent(r) {
+  const failed = !!r.error;
+  const drift = !!r.drift_detected;
+  const advances = !!r.advances_trail;
+  const suppressed = !!r.suppressed;
+  const delivered = !!r.delivered_to_agent;
+  const cls = drift ? "card trail drift" : "card trail";
+  let badge;
+  if (failed) {
+    badge = '<span class="badge warn">trail failed</span>';
+  } else if (drift && delivered) {
+    badge = '<span class="badge bad">drift → delivered</span>';
+  } else if (drift && suppressed) {
+    badge = '<span class="badge" style="background:rgba(138,147,166,0.20);color:var(--muted);">drift → suppressed</span>';
+  } else if (drift) {
+    badge = '<span class="badge bad">drift</span>';
+  } else if (advances) {
+    badge = '<span class="badge" style="background:rgba(168,196,224,0.18);color:#a8c4e0;">breadcrumb</span>';
+  } else {
+    badge = '<span class="badge" style="background:rgba(138,147,166,0.18);color:var(--muted);">no change</span>';
+  }
+  const diff = Array.isArray(r.diff_summary) ? r.diff_summary : [];
+  const diffHtml = diff.length === 0
+    ? ''
+    : `
+      <div class="trail-body">
+        <div class="label">changes</div>
+        <ul style="margin:0;padding-left:18px;font-size:12.5px;line-height:1.6;">
+          ${diff.map(d => `<li>${escapeHtml(d)}</li>`).join('')}
+        </ul>
+      </div>`;
+  const skippedHtml = r.skipped_reason
+    ? `<div class="journal-skipped">${escapeHtml(r.skipped_reason)}</div>`
+    : '';
+  const errHtml = failed
+    ? `<div class="verdict-msg error"><b>error:</b> ${escapeHtml(r.error)}</div>`
+    : '';
+  let driftHtml = '';
+  if (drift) {
+    const kind = r.drift_kind || 'other';
+    const question = trailDriftQuestion(kind);
+    const supBadge = suppressed
+      ? '<span class="badge suppressed">suppressed</span>' : '';
+    const delBadge = delivered
+      ? '<span class="badge delivered">delivered</span>' : '';
+    driftHtml = `
+      <div class="trail-drift-banner">
+        <div>
+          <span class="kind">${escapeHtml(kind)}</span>
+          ${supBadge}
+          ${delBadge}
+        </div>
+        <div class="question">${escapeHtml(question)}</div>
+      </div>`;
+  }
+  const newSha = r.new_trail_sha || '';
+  const priorSha = r.prior_trail_sha || '';
+  return `
+    <div class="${cls}">
+      <div class="head">
+        <span class="tool">trail #${r.action_index ?? '?'}</span>
+        ${badge}
+        <span class="ts">${fmtTs(r.ts)}</span>
+        <span class="lat">${fmtMs(r.latency_ms)}</span>
+      </div>
+      ${driftHtml}
+      ${diffHtml}
+      ${skippedHtml}
+      ${errHtml}
+      ${newSha ? `
+        <details data-key="${detailKey(r, 'trail-new')}"${openAttr(r, 'trail-new')}>
+          <summary>trail after this update <span class="sysprompt-link">sha=${escapeHtml(newSha)}</span></summary>
+          <pre id="tn-${r.ts}"><button onclick="loadTrailSnap('${escapeHtml(newSha)}', 'tn-${r.ts}')">load</button></pre>
+        </details>` : ''}
+      ${priorSha ? `
+        <details data-key="${detailKey(r, 'trail-prior')}"${openAttr(r, 'trail-prior')}>
+          <summary>trail before this update <span class="sysprompt-link">sha=${escapeHtml(priorSha)}</span></summary>
+          <pre id="tp-${r.ts}"><button onclick="loadTrailSnap('${escapeHtml(priorSha)}', 'tp-${r.ts}')">load</button></pre>
+        </details>` : ''}
+    </div>
+  `;
 }
 
 function setView(view) {

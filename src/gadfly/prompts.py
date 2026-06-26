@@ -880,6 +880,379 @@ def _render_file_touch_trajectory(
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Trail — longitudinal conceptual breadcrumbs of the main agent.
+#
+# `trail.py` runs on every PostToolUse and decides:
+#   (a) does this action ADVANCE the conceptual trail (new breadcrumb),
+#       or REPEAT the last one (drop)?
+#   (b) is a longitudinal LAZINESS PATTERN visible across the last K
+#       breadcrumbs (Einstein-three-level violation)?
+#
+# This module owns the rubric. Code-side validation (suppression, stall
+# guard, root_goal-window reset) lives in trail.py. The model returns a
+# structured payload; whatever it writes for `drift_reasoning` is audit-only
+# and never reaches the supervised agent. On flag, the agent receives ONE
+# of the canonical Socratic questions from `TRAIL_DRIFT_QUESTIONS` below.
+# ---------------------------------------------------------------------------
+
+
+UPDATE_TRAIL_DESCRIPTION = (
+    "Submit your single decision on (a) whether this action advances the "
+    "conceptual trail and (b) whether a longitudinal Einstein-three-level "
+    "violation is now visible across the last few breadcrumbs. Call this "
+    "exactly once. `advances_trail` and `drift_detected` are independent. "
+    "When uncertain, default to advances_trail=false and drift_detected=false."
+)
+
+
+UPDATE_TRAIL_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "advances_trail": {"type": "boolean"},
+        "breadcrumb_text": {"type": ["string", "null"]},
+        "abstraction_level": {
+            "type": ["string", "null"],
+            "enum": [
+                "instance", "class", "architecture",
+                "rationalization", "unclear", None,
+            ],
+        },
+        "drift_detected": {"type": "boolean"},
+        "drift_kind": {
+            "type": ["string", "null"],
+            "enum": [
+                "hardcoded_instance", "premature_ceiling", "wrong_layer",
+                "rule_skip", "incomplete_coverage", "recon_as_work",
+                "rationalization", "other", None,
+            ],
+        },
+        "drift_reasoning": {"type": ["string", "null"]},
+        "cited_action_indexes": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
+    },
+    "required": [
+        "advances_trail", "drift_detected",
+    ],
+    "additionalProperties": False,
+}
+
+
+# Python-side simple shape used by the Claude-SDK backend's @tool decoder
+# (mirrors the SUBMIT_VERDICT_INPUT_SCHEMA pattern).
+UPDATE_TRAIL_INPUT_SCHEMA: dict[str, Any] = {
+    "advances_trail": bool,
+    "breadcrumb_text": str,
+    "abstraction_level": str,
+    "drift_detected": bool,
+    "drift_kind": str,
+    "drift_reasoning": str,
+    "cited_action_indexes": list,
+}
+
+
+TRAIL_UPDATE_SYSTEM_PROMPT = """\
+You are Gadfly's trail-maintainer. You watch the LONGITUDINAL conceptual
+path of a Claude Code agent — not single actions. Single-action critique
+is the watchdog's lane and is NOT your job. You answer two narrow
+questions about every PostToolUse:
+
+  (1) Does this action ADVANCE the conceptual trail — meaning the agent
+      moved to a new file area, new abstraction level, new sub-goal —
+      or is it a REPEAT of the last breadcrumb (same level, same locus,
+      same thing)?
+
+  (2) Is a longitudinal LAZINESS PATTERN now visible across the last few
+      breadcrumbs that wasn't visible from any single action?
+
+# THE EINSTEIN THREE-LEVEL RULE — your reference frame
+
+Before fixing a bug or shipping a feature, a careful engineer asks:
+
+    "This specific case I'm about to handle — it's an instance of WHAT?"
+
+and climbs MINIMUM three levels:
+
+    instance        — one literal value, one example, one branch
+        ↓
+    class           — the closed catalog the instance belongs to
+        ↓
+    architecture    — the slot in the system where the class is handled
+
+The professional fix lands at the CLASS level or higher: one enum-keyed
+path that covers all instances. Hardcoding `if value == "fire": ...`
+is the failure mode this rule guards against.
+
+Extension for trail rubric — you also recognise:
+
+    rationalization — agent re-explains a prior wrong-level fix
+                       (post-hoc justification, not progress)
+    unclear         — recon / Read / grep / status with no committed
+                       level (legitimate when scoped to investigation,
+                       suspicious when it dominates)
+
+# THE 7 LONGITUDINAL LAZINESS PATTERNS — your taxonomy
+
+These are concrete shapes the user has historically flagged. EACH is
+visible only across multiple breadcrumbs — that is why the watchdog
+misses them and you exist.
+
+  hardcoded_instance  — N consecutive instance-level patches for one
+                        catalog. Agent kept multiplying instances
+                        instead of climbing to the class slot.
+                        Signal: ≥3 breadcrumbs at level=instance
+                        targeting related concepts (same domain noun).
+
+  premature_ceiling   — agent climbed ONE level (instance → class) but
+                        stopped before the architecture slot that
+                        clearly exists. Signal: class-level breadcrumb
+                        followed by a sibling class-level breadcrumb
+                        (parallel patches at the same level) instead
+                        of a single architecture-level breadcrumb.
+
+  wrong_layer         — fix lands in the wrong architectural bucket
+                        (e.g. classification done in TickProcessor
+                        when it belongs in the LLM call; rendering
+                        logic done in domain layer). Signal:
+                        breadcrumb's locus (file / module) is
+                        mis-matched to the concept it edits.
+
+  rule_skip           — repository has an existing convention / rule /
+                        contract visible in CLAUDE.md, surrounding
+                        code patterns, or active plan — and the agent
+                        bypassed it. Signal: breadcrumb violates a
+                        rule that was visible in the journal or
+                        active plan.
+
+  incomplete_coverage — agent closed one branch of N obviously
+                        equivalent branches. Signal: breadcrumb_text
+                        announces completion of a feature whose
+                        instance-class structure visibly has more
+                        members than were handled.
+
+  recon_as_work       — ≥5 consecutive breadcrumbs at level=unclear
+                        (Read / grep / status / Bash diagnostics)
+                        with NO instance-or-higher commit. The agent
+                        has been reading, not building.
+
+  rationalization     — current breadcrumb's text re-explains a PRIOR
+                        wrong-level fix instead of correcting it.
+                        Signal: breadcrumb at level=rationalization
+                        following a level=instance breadcrumb the
+                        user has not approved.
+
+When in doubt about which kind applies, pick the SINGLE most-applicable
+one. When more than one fits genuinely, pick the EARLIEST in the
+taxonomy listed above (hardcoded_instance > premature_ceiling > ...).
+Set drift_kind="other" only when you would say "this is laziness but
+none of the 7 fit"; in practice this should be rare.
+
+# ADVANCE VS REPEAT — the gate for breadcrumb creation
+
+A new breadcrumb fires when the agent's CONCEPTUAL STANCE changed:
+new file area, new abstraction level, new sub-goal, new mechanism
+under attack. Mechanical re-edits of the same function at the same
+level do NOT advance the trail — that is "same breadcrumb, more
+keystrokes", set advances_trail=false.
+
+Examples:
+  - Edit 1: add `hazardCatalog["fire"] = True` (instance, fires.go)
+    Edit 2: add `hazardCatalog["flood"] = True` (instance, fires.go)
+    → both instance-level patches in the same file → second one is
+      REPEAT, advances_trail=false. (But this might trigger
+      drift_detected=true with kind=hardcoded_instance if a class
+      slot exists.)
+
+  - Edit 1: introduce `resolveHazard(name string) Effect` (class, hazards.go)
+    Edit 2: replace the manual `if` chain in tick.go with a call to
+            `resolveHazard("fire")` (architecture, tick.go)
+    → second one advances: new file, higher level, structural lift.
+      advances_trail=true.
+
+  - Bash 1: `grep -rn "hazardCatalog" .`
+    Read 2: `Read fires.go`
+    → both unclear-level reconnaissance, second one does NOT advance.
+      advances_trail=false. (Track for recon_as_work if it persists.)
+
+# DRIFT IS VISIBLE IN THE TRAIL, NOT IN THE ACTION
+
+A single instance-level patch is fine. Three consecutive instance-level
+patches when a class-slot is visible IS hardcoded_instance. You will
+ONLY see this difference by reading the breadcrumb list. Refuse to
+flag drift on the current action alone — your evidence is the trail.
+
+When you do flag drift, populate `cited_action_indexes` with the
+specific breadcrumb action_indexes that constitute the pattern. An
+empty or vague citation is grounds for the caller to discard your
+flag — be concrete.
+
+# OUTPUT PROTOCOL
+
+Call `update_trail` exactly once. Nothing else. No preamble, no
+narration, no closing remark. Required fields: `advances_trail`,
+`drift_detected`. When `advances_trail=true` you SHOULD include
+`breadcrumb_text` (≤140 chars, 1 line) and `abstraction_level`. When
+`drift_detected=true` you MUST include `drift_kind`, `drift_reasoning`
+(≤400 chars audit text, English), and `cited_action_indexes` (≥1 entry).
+
+REMINDERS:
+  - Default both booleans to false when uncertain.
+  - `drift_reasoning` is audit only; the agent never reads it. Be
+    blunt and specific — name the action_indexes, the pattern, the
+    failure mode.
+  - When the same drift_kind already fired in the last 3 PostToolUse
+    events, you may still report drift_detected=true — the caller
+    handles suppression — but consider whether the pattern is now
+    quiescent and silence is honest.
+  - Reply with the tool call ONLY.
+"""
+
+
+# OpenAI JSON-mode backend suffix — same shape as the watchdog's
+# silent json instruction (lives in backends/openai_json.py). Appended
+# to the user message when the backend is `openai_json` to force the
+# model to emit the structured object directly rather than via a tool.
+_TRAIL_OUTPUT_FORMAT_SUFFIX = """
+
+# OUTPUT FORMAT (JSON MODE)
+Respond with ONE JSON object matching exactly this shape:
+{
+  "advances_trail": <bool>,
+  "breadcrumb_text": <string or null>,
+  "abstraction_level": "instance" | "class" | "architecture" | "rationalization" | "unclear" | null,
+  "drift_detected": <bool>,
+  "drift_kind": "hardcoded_instance" | "premature_ceiling" | "wrong_layer" | "rule_skip" | "incomplete_coverage" | "recon_as_work" | "rationalization" | "other" | null,
+  "drift_reasoning": <string or null>,
+  "cited_action_indexes": [<integer>, ...]
+}
+Respond in English. No surrounding text — JSON only."""
+
+
+# Canonical Socratic questions delivered to the supervised agent on flag.
+# One frozen string per drift_kind. The agent never sees `drift_reasoning`
+# — only the question for the matched kind. Style mirrors
+# WRONG_LEVEL_SUGGESTION: monitored-by-Gadfly framing + concrete Einstein
+# question + opt-out clause for legitimate mechanical / scoped work.
+TRAIL_DRIFT_QUESTIONS: dict[str, str] = {
+    "hardcoded_instance": (
+        "Your work is being monitored. The last few actions look like "
+        "case-by-case patches for one literal value or example. Stop "
+        "and answer honestly:\n"
+        "1. The instance you just fixed — it's a specific case of WHAT? "
+        "Name the CLASS.\n"
+        "2. Where in the codebase does that class already have a slot "
+        "(catalog / enum / dispatcher / factory)? Name the file or "
+        "symbol.\n"
+        "3. If the slot exists — should you stop and route the next "
+        "patch through it? If no slot exists — should you create one "
+        "before adding the next patch?\n"
+        "Ignore if this is a mechanical refactor or a scoped step the "
+        "user explicitly approved."
+    ),
+    "premature_ceiling": (
+        "Your work is being monitored. The trail shows you climbed "
+        "one abstraction level (instance → class) and then stopped. "
+        "Stop and answer honestly:\n"
+        "1. What level above the class would the architectural fix "
+        "live at? Name the slot or layer.\n"
+        "2. Does that slot already exist? If yes — why are you "
+        "treating the symptom at class-level instead of routing "
+        "through the architecture?\n"
+        "3. If no architecture slot exists yet — is the right move "
+        "creating one, or is the class-level fix genuinely the "
+        "ceiling for this concern?\n"
+        "Ignore if scoped / mechanical / class-level genuinely is "
+        "the natural ceiling here."
+    ),
+    "wrong_layer": (
+        "Your work is being monitored. The fix you just placed may "
+        "be in the wrong architectural layer for the concern it "
+        "addresses. Stop and answer honestly:\n"
+        "1. The thing you just changed — what is its responsibility "
+        "in this system? (presentation / domain / persistence / "
+        "scheduling / classification / etc.)\n"
+        "2. The bug or feature you are addressing — which layer "
+        "owns it?\n"
+        "3. If the two don't match — what would moving the fix to "
+        "the right layer cost, and why isn't that the right answer?\n"
+        "Ignore if the layering is intentional and you've already "
+        "named the reason."
+    ),
+    "rule_skip": (
+        "Your work is being monitored. The action you just took "
+        "appears to bypass a rule, convention, or contract visible "
+        "in the project (CLAUDE.md, an active plan, a surrounding "
+        "code pattern). Stop and answer honestly:\n"
+        "1. What rule or convention applies here? Name it.\n"
+        "2. Did you bypass it because you saw a reason to deviate, "
+        "or because the bypass was more convenient?\n"
+        "3. If it was convenience — what does compliance cost, and "
+        "why isn't paying that cost the right answer?\n"
+        "Ignore if the rule genuinely does not apply or you have "
+        "explicit user authorization to deviate."
+    ),
+    "incomplete_coverage": (
+        "Your work is being monitored. The last action closed ONE "
+        "branch of what looks like a larger equivalent set. Stop "
+        "and answer honestly:\n"
+        "1. The thing you just handled — what are the other members "
+        "of its class? List them.\n"
+        "2. Will the fix you just applied cover them? If not — what "
+        "test would expose the gap?\n"
+        "3. Should you handle all members in one structural pass, "
+        "or is partial coverage genuinely the right scope here?\n"
+        "Ignore if the user explicitly scoped the work to one branch "
+        "or if other branches are genuinely out of scope."
+    ),
+    "recon_as_work": (
+        "Your work is being monitored. The last several actions "
+        "have been reading, grepping, or running diagnostics — no "
+        "code committed. Stop and answer honestly:\n"
+        "1. What concrete BUILD step have you committed in the last "
+        "few moves? Name one.\n"
+        "2. If none — do you have enough context to commit one now, "
+        "or is recon still genuinely required?\n"
+        "3. If you still need recon — what is the SPECIFIC question "
+        "the next read should answer? (Not 'understand X' — what "
+        "would the answer LOOK like?)\n"
+        "Ignore if the user explicitly asked for reconnaissance / "
+        "analysis only."
+    ),
+    "rationalization": (
+        "Your work is being monitored. The reasoning in your last "
+        "action looks like a post-hoc justification of a previous "
+        "wrong-level step rather than a correction. Stop and answer "
+        "honestly:\n"
+        "1. Which prior action are you defending? Name it.\n"
+        "2. If a senior reviewer looked at that action without your "
+        "explanation, would they accept it at face value? If not — "
+        "what would they ask you to redo?\n"
+        "3. Should the next move be a correction at the right level, "
+        "rather than another paragraph of justification?\n"
+        "Ignore if the prior action was correct and the explanation "
+        "is genuinely just communicative."
+    ),
+    "other": (
+        "Your work is being monitored, and THIS specific action "
+        "triggered a longitudinal check across the recent trail. "
+        "Stop and answer honestly:\n"
+        "1. The fix you just made — it's a specific case of WHAT? "
+        "Name the class.\n"
+        "2. Does the surrounding code already have a catalog / "
+        "layer / abstraction for that class? Name the file or "
+        "symbol.\n"
+        "3. Is your fix at the level of the class, or one level "
+        "below (at the specific instance)? If below — what does "
+        "the class-level fix look like? Write it out and execute "
+        "THAT instead.\n"
+        "Ignore if mechanical refactor / user-approved scoped step "
+        "/ no class exists yet."
+    ),
+}
+
+
 def build_user_message(
     *,
     tool_name: str,

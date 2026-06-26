@@ -44,6 +44,40 @@ def _journals_dir() -> Path:
     return _root().parent / "journals"
 
 
+def _trails_dir() -> Path:
+    """Content-addressed trail snapshot store. Same pattern as journals."""
+    return _root().parent / "trails"
+
+
+def ensure_trail_snapshot(trail_json: str) -> str:
+    """Content-address a trail JSON string. Returns sha. Idempotent.
+
+    Audit log entries reference this sha so the trail's full breadcrumb
+    list never inlines into log lines — keeps `<session>.jsonl` skimmable
+    even after long sessions.
+    """
+    sha = hashlib.sha256(trail_json.encode("utf-8")).hexdigest()[:16]
+    try:
+        d = _trails_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{sha}.json"
+        if not path.exists():
+            path.write_text(trail_json, encoding="utf-8")
+    except Exception:
+        pass
+    return sha
+
+
+def read_trail_snapshot(sha: str) -> str | None:
+    try:
+        path = _trails_dir() / f"{sha}.json"
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+    except Exception:
+        pass
+    return None
+
+
 def ensure_journal_snapshot(journal_json: str) -> str:
     """Content-address a journal JSON string. Returns sha. Idempotent.
 
@@ -219,6 +253,54 @@ def append_journal_event(
             "action_index": action_index,
             "prior_journal_sha": prior_journal_sha,
             "new_journal_sha": new_journal_sha,
+            "diff_summary": diff_summary,
+            "latency_ms": latency_ms,
+            "error": error,
+            "skipped_reason": skipped_reason,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def append_trail_event(
+    *,
+    session_id: str,
+    action_index: int,
+    prior_trail_sha: str | None,
+    new_trail_sha: str | None,
+    advances_trail: bool,
+    drift_detected: bool,
+    drift_kind: str | None,
+    suppressed: bool,
+    delivered_to_agent: bool,
+    diff_summary: list[str],
+    latency_ms: float | None,
+    error: str | None,
+    skipped_reason: str | None = None,
+) -> None:
+    """Append one trail-update event. Same file as verdict / journal / goal
+    records; differentiated by `type=trail_update`. `prior_trail_sha` /
+    `new_trail_sha` reference content-addressed snapshots under
+    ~/.claude/gadfly/trails/<sha>.json so the line stays tiny even when
+    the trail itself has 30 breadcrumbs.
+    """
+    try:
+        root = _root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{session_id or 'unknown'}.jsonl"
+        record = {
+            "type": "trail_update",
+            "ts": time.time(),
+            "action_index": action_index,
+            "prior_trail_sha": prior_trail_sha,
+            "new_trail_sha": new_trail_sha,
+            "advances_trail": advances_trail,
+            "drift_detected": drift_detected,
+            "drift_kind": drift_kind,
+            "suppressed": suppressed,
+            "delivered_to_agent": delivered_to_agent,
             "diff_summary": diff_summary,
             "latency_ms": latency_ms,
             "error": error,

@@ -128,13 +128,20 @@ class OpenAIJsonBackend:
         return h
 
     def _build_body(
-        self, *, system_prompt: str, user_message: str, model: str
+        self, *, system_prompt: str, user_message: str, model: str,
+        tool_name: str = "submit_verdict",
     ) -> dict[str, Any]:
+        # Callers OTHER than the verdict watchdog (e.g. trail) embed their
+        # own output-format suffix in the user_message and have their own
+        # JSON schema. Appending the watchdog's verdict instruction would
+        # confuse the model. Heuristic: only the verdict pipeline asks for
+        # `submit_verdict` — everyone else owns their own format block.
+        suffix = _JSON_INSTRUCTION if tool_name == "submit_verdict" else ""
         return {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message + _JSON_INSTRUCTION},
+                {"role": "user", "content": user_message + suffix},
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0,
@@ -164,6 +171,7 @@ class OpenAIJsonBackend:
             system_prompt=system_prompt,
             user_message=user_message,
             model=model,
+            tool_name=tool_name,
         )
         t0 = time.monotonic()
         loop = asyncio.get_running_loop()
@@ -238,10 +246,10 @@ class OpenAIJsonBackend:
                     error="JSON is not an object",
                     latency_ms=dt,
                 )
-            # Verdict.from_tool_input is tolerant of missing fields, but
-            # require the "professional" key to be present and boolean —
-            # otherwise the verdict has no signal.
-            if "professional" not in parsed:
+            # Verdict pipeline requires "professional" — without it the
+            # watchdog has no signal. Other tools (e.g. update_trail)
+            # validate downstream; we just hand the parsed object back.
+            if tool_name == "submit_verdict" and "professional" not in parsed:
                 return BackendResult(
                     verdict_args=None,
                     error="JSON missing 'professional' field",

@@ -120,6 +120,38 @@ def test_hook_emits_additional_context_when_unprofessional(monkeypatch, tmp_log_
     assert rec["verdict"]["professional"] is False
 
 
+def test_hook_shadow_mode_swallows_additional_context(monkeypatch, tmp_log_dir: Path):
+    """GADFLY_SHADOW=1: hook runs everything, writes audit log, but the
+    additionalContext stays out of the agent's view. Used to validate
+    the trail rubric on real sessions before flipping FEEDBACK on."""
+    monkeypatch.setenv("GADFLY_SHADOW", "1")
+    verdict = Verdict(professional=False, reason="symptom fix", suggestion="x")
+    with patch.object(
+        hook.watchdog,
+        "evaluate",
+        return_value=EvaluationResult(verdict, None),
+    ):
+        rc, out = _run_hook(
+            monkeypatch,
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "a.py", "old_string": "x", "new_string": "y"},
+                "tool_response": {"success": True},
+                "session_id": "shadow_sid",
+                "transcript_path": "",
+            },
+        )
+    assert rc == 0
+    # Hook produced no agent-facing output despite an unprofessional verdict.
+    assert out == ""
+    # But the verdict was still written to the audit log for the viewer.
+    log_files = list(tmp_log_dir.glob("shadow_sid.jsonl"))
+    assert len(log_files) == 1
+    rec = json.loads(log_files[0].read_text().strip())
+    assert rec["verdict"]["professional"] is False
+
+
 def test_hook_writes_heartbeat_for_historian(monkeypatch, tmp_log_dir: Path):
     """H2: every PostToolUse on a watched tool drops a heartbeat tick
     keyed by encoded cwd. The daemon picks these up to know which
