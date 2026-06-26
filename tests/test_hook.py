@@ -214,6 +214,170 @@ def test_hook_shadow_mode_swallows_additional_context(monkeypatch, tmp_log_dir: 
     assert rec["verdict"]["professional"] is False
 
 
+def _make_stop_verdict(stop_appropriate, missing=None, error=None):
+    from gadfly import trail as trail_mod
+    return trail_mod.StopVerdict(
+        stop_appropriate=stop_appropriate,
+        reasoning="audit-only model text",
+        missing_pieces=list(missing or []),
+        delivered_to_agent=False,
+        error=error,
+        latency_ms=12.3,
+        raw_payload={"stop_appropriate": stop_appropriate},
+    )
+
+
+def test_stop_hook_no_op_when_disabled(monkeypatch, tmp_log_dir: Path):
+    """GADFLY_STOP=0 (default) → Stop event is a complete no-op:
+    no rubric call, no audit log line, no agent output."""
+    from gadfly import trail as trail_mod
+    monkeypatch.setenv("GADFLY_STOP", "0")
+    called = {"n": 0}
+    def _spy(**kwargs):
+        called["n"] += 1
+        return _make_stop_verdict(True)
+    monkeypatch.setattr(trail_mod, "evaluate_stop", _spy)
+    rc, out = _run_hook(
+        monkeypatch,
+        {"hook_event_name": "Stop", "session_id": "stop-noop", "cwd": "/x"},
+    )
+    assert rc == 0
+    assert out == ""
+    assert called["n"] == 0
+    assert not list(tmp_log_dir.glob("stop-noop.jsonl"))
+
+
+def test_stop_hook_appropriate_stays_silent(monkeypatch, tmp_log_dir: Path):
+    """STOP=1, FEEDBACK=1, rubric returns appropriate=True → agent
+    stops naturally (no block), audit log records the verdict."""
+    from gadfly import trail as trail_mod
+    monkeypatch.setenv("GADFLY_STOP", "1")
+    monkeypatch.setenv("GADFLY_STOP_FEEDBACK", "1")
+    # Need a non-empty latest_user_message — feed one via the fake session.
+    from gadfly import session as session_mod
+    real_load = session_mod.load
+    def _patched_load(*args, **kwargs):
+        ctx = real_load(*args, **kwargs)
+        ctx.recent_user_requests = ["please fix the bug"]
+        ctx.last_assistant_plan = "I'm done — pushed the fix and added tests."
+        return ctx
+    monkeypatch.setattr(session_mod, "load", _patched_load)
+    monkeypatch.setattr(
+        trail_mod, "evaluate_stop",
+        lambda **kw: _make_stop_verdict(True),
+    )
+    rc, out = _run_hook(
+        monkeypatch,
+        {"hook_event_name": "Stop", "session_id": "stop-ok", "cwd": "/x"},
+    )
+    assert rc == 0
+    assert out == ""  # no block emitted
+    log_files = list(tmp_log_dir.glob("stop-ok.jsonl"))
+    assert len(log_files) == 1
+    rec = json.loads(log_files[0].read_text().strip())
+    assert rec["type"] == "stop_verdict"
+    assert rec["stop_appropriate"] is True
+    assert rec["delivered_to_agent"] is False
+
+
+def test_stop_hook_premature_emits_block(monkeypatch, tmp_log_dir: Path):
+    """STOP=1, FEEDBACK=1, rubric returns appropriate=False →
+    decision:block emitted with the canonical question, audit log
+    records delivered_to_agent=True."""
+    from gadfly import session as session_mod
+    from gadfly import trail as trail_mod
+    from gadfly.prompts import TRAIL_STOP_QUESTION
+    monkeypatch.setenv("GADFLY_STOP", "1")
+    monkeypatch.setenv("GADFLY_STOP_FEEDBACK", "1")
+    real_load = session_mod.load
+    def _patched_load(*args, **kwargs):
+        ctx = real_load(*args, **kwargs)
+        ctx.recent_user_requests = ["build feature X with tests"]
+        ctx.last_assistant_plan = "I shipped the first half — what's next?"
+        return ctx
+    monkeypatch.setattr(session_mod, "load", _patched_load)
+    monkeypatch.setattr(
+        trail_mod, "evaluate_stop",
+        lambda **kw: _make_stop_verdict(
+            False, missing=["tests for feature X"],
+        ),
+    )
+    rc, out = _run_hook(
+        monkeypatch,
+        {"hook_event_name": "Stop", "session_id": "stop-bad", "cwd": "/x"},
+    )
+    assert rc == 0
+    payload = json.loads(out)
+    # documented Stop-hook decision format
+    assert payload["decision"] == "block"
+    assert payload["reason"] == TRAIL_STOP_QUESTION
+    rec = json.loads(
+        (tmp_log_dir / "stop-bad.jsonl").read_text().strip()
+    )
+    assert rec["stop_appropriate"] is False
+    assert rec["delivered_to_agent"] is True
+    assert rec["missing_pieces"] == ["tests for feature X"]
+
+
+def test_stop_hook_premature_silent_when_feedback_off(monkeypatch, tmp_log_dir: Path):
+    """STOP=1, FEEDBACK=0 (validation mode) — rubric runs, audit log
+    records premature, but NO block is emitted. This is the
+    eyeball-validation default before flipping FEEDBACK on."""
+    from gadfly import session as session_mod
+    from gadfly import trail as trail_mod
+    monkeypatch.setenv("GADFLY_STOP", "1")
+    monkeypatch.setenv("GADFLY_STOP_FEEDBACK", "0")
+    real_load = session_mod.load
+    def _patched_load(*args, **kwargs):
+        ctx = real_load(*args, **kwargs)
+        ctx.recent_user_requests = ["do A, B, C"]
+        ctx.last_assistant_plan = "Did A. Stopping."
+        return ctx
+    monkeypatch.setattr(session_mod, "load", _patched_load)
+    monkeypatch.setattr(
+        trail_mod, "evaluate_stop",
+        lambda **kw: _make_stop_verdict(False, missing=["B", "C"]),
+    )
+    rc, out = _run_hook(
+        monkeypatch,
+        {"hook_event_name": "Stop", "session_id": "stop-shadow", "cwd": "/x"},
+    )
+    assert rc == 0
+    assert out == ""
+    rec = json.loads(
+        (tmp_log_dir / "stop-shadow.jsonl").read_text().strip()
+    )
+    assert rec["stop_appropriate"] is False
+    assert rec["delivered_to_agent"] is False
+
+
+def test_stop_hook_no_user_request_stays_silent(monkeypatch, tmp_log_dir: Path):
+    """No latest user request → no rubric call (no signal to compare).
+    Avoids spurious blocks at session start before user typed anything."""
+    from gadfly import session as session_mod
+    from gadfly import trail as trail_mod
+    monkeypatch.setenv("GADFLY_STOP", "1")
+    monkeypatch.setenv("GADFLY_STOP_FEEDBACK", "1")
+    real_load = session_mod.load
+    def _patched_load(*args, **kwargs):
+        ctx = real_load(*args, **kwargs)
+        ctx.recent_user_requests = []
+        return ctx
+    monkeypatch.setattr(session_mod, "load", _patched_load)
+    called = {"n": 0}
+    def _spy(**kw):
+        called["n"] += 1
+        return _make_stop_verdict(False)
+    monkeypatch.setattr(trail_mod, "evaluate_stop", _spy)
+    rc, out = _run_hook(
+        monkeypatch,
+        {"hook_event_name": "Stop", "session_id": "stop-bare", "cwd": "/x"},
+    )
+    assert rc == 0
+    assert out == ""
+    assert called["n"] == 0
+
+
 def test_hook_writes_heartbeat_for_historian(monkeypatch, tmp_log_dir: Path):
     """H2: every PostToolUse on a watched tool drops a heartbeat tick
     keyed by encoded cwd. The daemon picks these up to know which

@@ -418,6 +418,8 @@ only. Belt-and-braces: `tool_name == "Task"` is also not in
 | `GADFLY_TRAIL`              | `1`     | trail runs on every PostToolUse         |
 | `GADFLY_TRAIL_FEEDBACK`     | `0`     | drift questions reach agent (Phase 2)   |
 | `GADFLY_SHADOW`             | `0`     | hook silences watchdog + phase-C output |
+| `GADFLY_STOP`               | `0`     | Stop hook runs stop-completion rubric   |
+| `GADFLY_STOP_FEEDBACK`      | `0`     | `decision:block` forces agent to keep going |
 
 `SHADOW=1` + `TRAIL_FEEDBACK=1` is a third meaningful mode: the
 ONLY thing the agent ever hears is the trail's fixed canonical
@@ -426,6 +428,41 @@ in the audit log (viewer reads them) but never reach the agent's
 context. This is the production-safe "live" mode for users who want
 trail steering without re-introducing the watchdog noise they
 disabled earlier.
+
+### Stop hook (catches "agent stopped with work undone")
+
+PostToolUse catches drift IN motion. The Stop hook catches a different
+shape of laziness: the agent finishes a turn while user-requested work
+is still open. Registered alongside cc-telegram-notify in
+`~/.claude/settings.json` Stop array.
+
+Flow: on Stop event, hook loads the session's transcript + breadcrumb
+trail, pulls the verbatim latest user request and the final assistant
+text, and calls `trail.evaluate_stop_async` (one LLM call,
+`STOP_RUBRIC_SYSTEM_PROMPT`). Model returns `stop_appropriate`
+(bool) + `missing_pieces` (list of named open asks, audit only) +
+`reasoning` (audit only).
+
+When `stop_appropriate=false` AND `GADFLY_STOP_FEEDBACK=1`, the
+hook writes the documented `{"decision":"block","reason":TRAIL_STOP_QUESTION}`
+JSON to stdout. Claude Code interprets that as "do not let this turn
+end; show this reason as guidance". The `reason` is ALWAYS the fixed
+canonical question — never the model's own reasoning, same architecture
+as TRAIL_DRIFT_QUESTIONS.
+
+Conservative defaults: rubric defaults to `stop_appropriate=true`
+when uncertain, hook returns silence on any model failure, and on
+sessions with no captured user request the hook stays silent
+(nothing to compare against). False-positive blocks cost the user a
+forced redo of a turn that was already complete — that is the
+expensive failure mode, so the rubric leans toward letting the agent
+stop.
+
+Audit type: `stop_verdict` with fields `{stop_appropriate, reasoning,
+missing_pieces, delivered_to_agent, latency_ms, error}`. Viewer
+renders cards with green "stop ok" or red "stop blocked → delivered"
+badge, missing_pieces list, audit reasoning, and the verbatim
+canonical question if it was forced to the agent.
 
 Three phases:
 - **Phase 0 — full shadow.** `GADFLY_SHADOW=1`. Hook runs, audit log

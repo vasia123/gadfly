@@ -59,7 +59,12 @@ from claude_agent_sdk import (
 
 from . import log as audit_log
 from .prompts import (
+    EVALUATE_STOP_DESCRIPTION,
+    EVALUATE_STOP_INPUT_SCHEMA,
+    EVALUATE_STOP_JSON_SCHEMA,
+    STOP_RUBRIC_SYSTEM_PROMPT,
     TRAIL_DRIFT_QUESTIONS,
+    TRAIL_STOP_QUESTION,
     TRAIL_UPDATE_SYSTEM_PROMPT,
     UPDATE_TRAIL_DESCRIPTION,
     UPDATE_TRAIL_INPUT_SCHEMA,
@@ -957,3 +962,288 @@ def question_for_kind(kind: str) -> str:
     back to the 'other' question for unknown kinds.
     """
     return TRAIL_DRIFT_QUESTIONS.get(kind) or TRAIL_DRIFT_QUESTIONS["other"]
+
+
+# --- Stop-event rubric ------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StopVerdict:
+    stop_appropriate: bool
+    reasoning: str
+    missing_pieces: list[str]
+    delivered_to_agent: bool  # true ⇒ Stop hook emitted decision=block
+    error: str | None
+    latency_ms: float
+    raw_payload: dict[str, Any] | None
+
+
+def _render_trail_for_stop(t: Trail, window: int = 30) -> str:
+    """Render the full breadcrumb trail for the stop rubric. Larger
+    window than per-tick rendering because the rubric needs the whole
+    journey, not just the recent suffix."""
+    if not t.breadcrumbs:
+        return "(empty trail — agent did no recorded tool actions this session)"
+    lines: list[str] = []
+    crumbs = t.breadcrumbs[-window:]
+    if len(t.breadcrumbs) > window:
+        lines.append(
+            f"(showing last {window} of {len(t.breadcrumbs)} breadcrumbs)"
+        )
+    for b in crumbs:
+        lines.append(
+            f"  [{b.abstraction_level}] #{b.action_index}  "
+            f"{_clip(b.breadcrumb_text, 160)}"
+        )
+        if b.action_summary:
+            lines.append(f"      action: {_clip(b.action_summary, 200)}")
+    return "\n".join(lines)
+
+
+def build_stop_user_message(
+    *,
+    trail: Trail,
+    latest_user_message: str,
+    final_assistant_text: str | None,
+    json_mode: bool = False,
+) -> str:
+    """Compose the user message for the stop rubric. `json_mode=True`
+    appends the openai_json output-format suffix."""
+    from .prompts import _STOP_OUTPUT_FORMAT_SUFFIX
+
+    parts: list[str] = []
+    parts.append(
+        "## Most recent USER REQUEST (verbatim)\n"
+        + _clip(latest_user_message, 3000)
+    )
+    parts.append("## Breadcrumb trail\n" + _render_trail_for_stop(trail))
+    if final_assistant_text:
+        parts.append(
+            "## Agent's FINAL TEXT (the message ending the turn)\n"
+            + _clip(final_assistant_text, 4000)
+        )
+    else:
+        parts.append("## Agent's FINAL TEXT\n(none recorded)")
+    parts.append(
+        "## Task\n"
+        "Apply the rubric in the system prompt. Decide:\n"
+        " (1) Decompose the USER REQUEST into concrete asks.\n"
+        " (2) For each ask: find evidence in the trail (committed work) or "
+        "in the FINAL TEXT (legitimate scoping / blocker).\n"
+        " (3) If everything is addressed → stop_appropriate=true. If any "
+        "ask is open without a legitimate reason → stop_appropriate=false "
+        "with `missing_pieces` naming what's open.\n"
+        "Default stop_appropriate=true when uncertain. Call "
+        "`evaluate_stop` exactly once."
+    )
+    msg = "\n\n".join(parts)
+    if json_mode:
+        msg += _STOP_OUTPUT_FORMAT_SUFFIX
+    return msg
+
+
+def _build_stop_tool(captured: _Captured):
+    @tool("evaluate_stop", EVALUATE_STOP_DESCRIPTION, EVALUATE_STOP_INPUT_SCHEMA)
+    async def evaluate_stop(args: dict[str, Any]) -> dict[str, Any]:
+        captured.payload = args
+        return {"content": [{"type": "text", "text": "stop recorded"}]}
+
+    return evaluate_stop
+
+
+def _build_stop_options(captured: _Captured, model: str) -> ClaudeAgentOptions:
+    server = create_sdk_mcp_server(
+        "gadfly_stop",
+        "1.0.0",
+        [_build_stop_tool(captured)],
+    )
+    return ClaudeAgentOptions(
+        model=model,
+        system_prompt=STOP_RUBRIC_SYSTEM_PROMPT,
+        mcp_servers={"gadfly_stop": server},
+        allowed_tools=["mcp__gadfly_stop__evaluate_stop"],
+        permission_mode="bypassPermissions",
+        setting_sources=[],
+        settings="{}",
+        thinking=ThinkingConfigDisabled(type="disabled"),
+        max_turns=2,
+        env={"GADFLY_INTERNAL": "1"},
+    )
+
+
+async def _evaluate_stop_sdk(
+    *,
+    user_message: str,
+    model: str,
+    timeout_s: float,
+    run_query: RunQuery,
+) -> tuple[dict[str, Any] | None, str | None]:
+    captured = _Captured()
+    options = _build_stop_options(captured, model)
+    try:
+        await asyncio.wait_for(
+            run_query(user_message, options), timeout=timeout_s
+        )
+    except asyncio.TimeoutError:
+        return None, f"timeout after {timeout_s}s"
+    except FileNotFoundError as exc:
+        return None, f"claude CLI not found: {exc!s}"
+    except Exception as exc:
+        return None, f"agent-sdk error: {exc!r}"
+    if captured.payload is None:
+        return None, "model did not call evaluate_stop"
+    return captured.payload, None
+
+
+async def _evaluate_stop_oai(
+    *,
+    backend,
+    user_message: str,
+    model: str,
+    timeout_s: float,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        br = await backend.evaluate(
+            system_prompt=STOP_RUBRIC_SYSTEM_PROMPT,
+            user_message=user_message,
+            model=model,
+            tool_name="evaluate_stop",
+            tool_description=EVALUATE_STOP_DESCRIPTION,
+            tool_parameters=EVALUATE_STOP_JSON_SCHEMA,
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        return None, f"backend error: {exc!r}"
+    if br.verdict_args is None:
+        return None, br.error or "no payload"
+    return dict(br.verdict_args), None
+
+
+async def evaluate_stop_async(
+    *,
+    session_id: str,
+    latest_user_message: str,
+    final_assistant_text: str | None,
+    model: str | None = None,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    backend: Any = None,
+    run_query: RunQuery | None = None,
+) -> StopVerdict:
+    """Run the stop rubric on the current session's trail. Returns a
+    StopVerdict — never raises. The trail is loaded from disk via
+    load_current(session_id); when missing, the rubric is asked
+    against an empty trail (still valid — the rubric works on the
+    user_request alone in that case).
+    """
+    t0 = time.perf_counter()
+    trail_state = load_current(session_id) or empty_trail()
+
+    json_mode = False
+    eff_backend = backend
+    if eff_backend is None and run_query is None:
+        eff_backend = _default_backend_from_env()
+    if eff_backend is not None and type(eff_backend).__name__.startswith(
+        "OpenAIJson"
+    ):
+        json_mode = True
+
+    user_message = build_stop_user_message(
+        trail=trail_state,
+        latest_user_message=latest_user_message,
+        final_assistant_text=final_assistant_text,
+        json_mode=json_mode,
+    )
+    eff_model = model or os.environ.get("GADFLY_MODEL") or DEFAULT_MODEL
+
+    if eff_backend is not None:
+        payload, error = await _evaluate_stop_oai(
+            backend=eff_backend,
+            user_message=user_message,
+            model=eff_model,
+            timeout_s=timeout_s,
+        )
+    else:
+        rq = run_query or _default_run_query
+        payload, error = await _evaluate_stop_sdk(
+            user_message=user_message,
+            model=eff_model,
+            timeout_s=timeout_s,
+            run_query=rq,
+        )
+    latency_ms = (time.perf_counter() - t0) * 1000.0
+
+    if payload is None:
+        # Conservative default: when the rubric fails, treat the stop as
+        # appropriate — better to let the agent stop than to force it
+        # into a confused continuation loop on a model error.
+        return StopVerdict(
+            stop_appropriate=True,
+            reasoning="(rubric failed — defaulting to appropriate)",
+            missing_pieces=[],
+            delivered_to_agent=False,
+            error=error,
+            latency_ms=latency_ms,
+            raw_payload=None,
+        )
+
+    stop_ok = bool(payload.get("stop_appropriate", True))
+    reasoning = str(payload.get("reasoning") or "")[:1000]
+    missing_raw = payload.get("missing_pieces") or []
+    missing: list[str] = []
+    if isinstance(missing_raw, list):
+        for m in missing_raw[:10]:
+            if isinstance(m, str) and m.strip():
+                missing.append(m.strip()[:200])
+    return StopVerdict(
+        stop_appropriate=stop_ok,
+        reasoning=reasoning,
+        missing_pieces=missing,
+        # delivered_to_agent is set by the hook layer based on
+        # GADFLY_STOP_FEEDBACK; trail layer just reports the verdict.
+        delivered_to_agent=False,
+        error=None,
+        latency_ms=latency_ms,
+        raw_payload=dict(payload),
+    )
+
+
+def evaluate_stop(
+    *,
+    session_id: str,
+    latest_user_message: str,
+    final_assistant_text: str | None,
+    model: str | None = None,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    backend: Any = None,
+    run_query: RunQuery | None = None,
+) -> StopVerdict:
+    """Sync entry point for the Stop hook (not inside an event loop)."""
+    try:
+        return asyncio.run(
+            evaluate_stop_async(
+                session_id=session_id,
+                latest_user_message=latest_user_message,
+                final_assistant_text=final_assistant_text,
+                model=model,
+                timeout_s=timeout_s,
+                backend=backend,
+                run_query=run_query,
+            )
+        )
+    except Exception as exc:
+        return StopVerdict(
+            stop_appropriate=True,
+            reasoning=f"(asyncio.run failed: {exc!r})",
+            missing_pieces=[],
+            delivered_to_agent=False,
+            error=f"asyncio.run failed: {exc!r}",
+            latency_ms=0.0,
+            raw_payload=None,
+        )
+
+
+def stop_question() -> str:
+    """The canonical Socratic question delivered to the agent when the
+    stop rubric flags premature_stop. Single fixed string — the model's
+    own reasoning never reaches the agent."""
+    return TRAIL_STOP_QUESTION

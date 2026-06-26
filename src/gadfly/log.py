@@ -312,6 +312,41 @@ def append_trail_event(
         pass
 
 
+def append_stop_event(
+    *,
+    session_id: str,
+    stop_appropriate: bool,
+    reasoning: str,
+    missing_pieces: list[str],
+    delivered_to_agent: bool,
+    latency_ms: float | None,
+    error: str | None,
+) -> None:
+    """Append one stop_verdict event. Records the Stop-hook decision so
+    the viewer can show whether the agent was let go or forced to
+    continue (and why). Same JSONL file as the other audit types;
+    differentiated by `type=stop_verdict`.
+    """
+    try:
+        root = _root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{session_id or 'unknown'}.jsonl"
+        record = {
+            "type": "stop_verdict",
+            "ts": time.time(),
+            "stop_appropriate": bool(stop_appropriate),
+            "reasoning": reasoning,
+            "missing_pieces": list(missing_pieces),
+            "delivered_to_agent": bool(delivered_to_agent),
+            "latency_ms": latency_ms,
+            "error": error,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def append_goal_event(
     *,
     session_id: str,

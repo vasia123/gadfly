@@ -1253,6 +1253,149 @@ TRAIL_DRIFT_QUESTIONS: dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Stop-event rubric — fires when the supervised agent finishes its turn.
+#
+# The trail rubric (above) operates per PostToolUse — it sees one action at
+# a time and decides "is there longitudinal drift?". The stop rubric is a
+# DIFFERENT question: "did the agent stop with work undone?".
+#
+# Input: full breadcrumb trail + verbatim last user request + verbatim
+# final assistant text. Output: stop_appropriate (bool) + reasoning
+# (audit-only) + missing_pieces (audit-only list of what the model thinks
+# is still open). On stop_appropriate=false, the hook can either log only
+# (shadow) or emit {"decision":"block","reason":TRAIL_STOP_QUESTION} to
+# force the agent to keep working with a canonical guidance question.
+# ---------------------------------------------------------------------------
+
+
+EVALUATE_STOP_DESCRIPTION = (
+    "Decide whether the agent's stop is appropriate (the user's most "
+    "recent ask is fully addressed) or premature (work still open). "
+    "Call this exactly once. Default to stop_appropriate=true when "
+    "uncertain — forcing the agent to keep working when the work is "
+    "actually done is a worse failure than letting it stop one turn "
+    "early."
+)
+
+
+EVALUATE_STOP_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "stop_appropriate": {"type": "boolean"},
+        "reasoning": {"type": ["string", "null"]},
+        "missing_pieces": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": ["stop_appropriate"],
+    "additionalProperties": False,
+}
+
+
+EVALUATE_STOP_INPUT_SCHEMA: dict[str, Any] = {
+    "stop_appropriate": bool,
+    "reasoning": str,
+    "missing_pieces": list,
+}
+
+
+STOP_RUBRIC_SYSTEM_PROMPT = """\
+You are Gadfly's stop-evaluator. The supervised agent has just finished
+its turn — you decide whether it stopped APPROPRIATELY (the user's most
+recent ask is genuinely complete) or PREMATURELY (work still open and
+the agent gave up).
+
+You will receive:
+  - The verbatim most recent USER REQUEST.
+  - The full BREADCRUMB TRAIL of the agent's session so far (ordered,
+    with abstraction_level per breadcrumb).
+  - The agent's FINAL TEXT — the assistant message that ended the turn.
+
+# THE CHECK
+
+Walk the user request and decompose it into concrete asks. For each
+ask, find evidence in the trail that it was ACTUALLY COMMITTED — a
+breadcrumb at instance/class/architecture level whose text or action
+summary shows the ask landed in code (Edit, Write, MultiEdit, Bash
+that built/tested/committed).
+
+If EVERY ask has corroborating evidence in the trail → stop_appropriate=true.
+
+If ANY ask is unaddressed AND the agent's final text does NOT name a
+LEGITIMATE reason for leaving it open, → stop_appropriate=false.
+
+# LEGITIMATE REASONS TO LEAVE WORK OPEN
+
+  - User explicitly approved partial delivery ("just do step 1, we'll
+    do 2 later").
+  - Genuine blocker outside the agent's control (external API down,
+    user needs to provide input, etc.) named explicitly in the final
+    text.
+  - The ask was a question (not a build request) and the agent answered
+    it.
+  - The ask was reconnaissance / analysis only.
+
+# WHAT NOT TO FLAG
+
+  - The agent shipped what was asked + mentioned bonus follow-up that
+    is genuinely out of scope.
+  - The agent's final text proposes next steps the user should
+    approve — that is legitimate scoping, not premature stopping.
+  - Final text is a SUMMARY of work done — pure communication, not
+    a stop in the middle of work.
+
+# CALIBRATION
+
+Default stop_appropriate=true when uncertain. False positives here
+(blocking a legitimate stop) cost the user a forced redo of a turn
+that was already complete. False negatives (missing a premature stop)
+cost one turn of additional work. The first failure mode is more
+expensive.
+
+# OUTPUT
+
+Call `evaluate_stop` exactly once.
+  - `stop_appropriate`: bool, required.
+  - `reasoning`: audit-only string, ≤500 chars, English. Name the
+    asks you identified and which have evidence vs not.
+  - `missing_pieces`: list of strings, each one a NAMED open ask
+    (file path, function, feature). Empty when stop_appropriate=true.
+"""
+
+
+# Output-format suffix appended to the user message when the OpenAI
+# JSON-mode backend is in play (it needs explicit shape instructions
+# because we strip the watchdog-shaped suffix).
+_STOP_OUTPUT_FORMAT_SUFFIX = """
+
+# OUTPUT FORMAT (JSON MODE)
+Respond with ONE JSON object matching exactly this shape:
+{
+  "stop_appropriate": <bool>,
+  "reasoning": <string or null>,
+  "missing_pieces": [<string>, ...]
+}
+Respond in English. No surrounding text — JSON only."""
+
+
+# Canonical Socratic question delivered to the supervised agent when
+# the stop rubric flags premature_stop. Format mirrors
+# TRAIL_DRIFT_QUESTIONS: monitored framing + concrete questions + opt-out.
+TRAIL_STOP_QUESTION = (
+    "Your work is being monitored, and you are about to stop. Before "
+    "stopping, re-read the user's most recent ask and answer honestly:\n"
+    "1. What did the user explicitly ask for? State it in one sentence.\n"
+    "2. Walk down the asks: which parts have you ACTUALLY committed "
+    "(landed in code / shipped output)? Which parts are still open?\n"
+    "3. If anything is open — is there a reason you cannot finish it now? "
+    "If there is no such reason, do NOT stop: finish the open work first.\n"
+    "Ignore if the user explicitly approved partial delivery or asked "
+    "for analysis-only."
+)
+
+
 def build_user_message(
     *,
     tool_name: str,

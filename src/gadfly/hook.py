@@ -273,6 +273,113 @@ def _emit_hook_output(output: dict[str, Any] | None) -> None:
         pass
 
 
+def _handle_stop(payload: dict[str, Any]) -> int:
+    """Stop hook entrypoint. Runs the stop rubric and — when
+    GADFLY_STOP_FEEDBACK=1 and the rubric flags premature_stop — emits
+    {decision:"block", reason:TRAIL_STOP_QUESTION} to force the agent
+    to keep working. Otherwise emits nothing and the agent stops
+    naturally.
+
+    Gated by GADFLY_STOP=1 (default off — opt-in until validated on
+    real sessions). Respects GADFLY_SHADOW=1 for muting except when
+    GADFLY_STOP_FEEDBACK=1 is explicitly set (modal SHADOW semantics,
+    same as the PostToolUse trail-feedback channel).
+    """
+    if os.environ.get("GADFLY_STOP", "0") != "1":
+        return 0
+
+    session_id = str(payload.get("session_id") or "unknown")
+    transcript_path = payload.get("transcript_path")
+    cwd = str(payload.get("cwd") or "")
+
+    # Load the session to pull the latest user request + final
+    # assistant text. The trail itself lives in
+    # ~/.claude/gadfly/trail/<session_id>.json and is loaded by
+    # trail.evaluate_stop_async via load_current(session_id).
+    ctx = session.load(
+        transcript_path if isinstance(transcript_path, str) else None,
+        session_id=session_id,
+        current_tool_input=None,
+        cwd=cwd,
+        distill=False,
+    )
+    latest_user = (
+        ctx.recent_user_requests[-1] if ctx.recent_user_requests else ""
+    )
+    final_text = ctx.last_assistant_plan or ""
+
+    if not latest_user:
+        # Without a user request to compare against, the rubric has no
+        # signal. Stay silent — let the agent stop.
+        return 0
+
+    from . import trail as trail_mod
+    t0 = time.perf_counter()
+    try:
+        verdict = trail_mod.evaluate_stop(
+            session_id=session_id,
+            latest_user_message=latest_user,
+            final_assistant_text=final_text,
+        )
+    except Exception as exc:
+        # Stop hook MUST NEVER fail. Log + bail.
+        try:
+            audit_log.append_stop_event(
+                session_id=session_id,
+                stop_appropriate=True,
+                reasoning=f"(exception: {exc!r})",
+                missing_pieces=[],
+                delivered_to_agent=False,
+                latency_ms=(time.perf_counter() - t0) * 1000.0,
+                error=f"evaluate_stop crashed: {exc!r}",
+            )
+        except Exception:
+            pass
+        return 0
+
+    feedback_on = os.environ.get("GADFLY_STOP_FEEDBACK", "0") == "1"
+    shadow_on = os.environ.get("GADFLY_SHADOW", "0") == "1"
+    # Modal-SHADOW semantics: when SHADOW=1 the audit log still fills
+    # but agent output is suppressed UNLESS the user explicitly opted
+    # into the stop feedback channel.
+    should_emit = (
+        (not verdict.stop_appropriate)
+        and feedback_on
+        and (not shadow_on or feedback_on)
+    )
+
+    try:
+        audit_log.append_stop_event(
+            session_id=session_id,
+            stop_appropriate=verdict.stop_appropriate,
+            reasoning=verdict.reasoning,
+            missing_pieces=verdict.missing_pieces,
+            delivered_to_agent=bool(should_emit),
+            latency_ms=verdict.latency_ms,
+            error=verdict.error,
+        )
+    except Exception:
+        pass
+
+    if not should_emit:
+        return 0
+
+    # Force the agent to keep working. The `decision:"block"` JSON
+    # format is the documented Stop-hook way to override the natural
+    # stop with a guidance reason. The reason is the FIXED canonical
+    # question — the model's own reasoning never reaches the agent.
+    from . import trail as trail_mod  # noqa: F811 — local re-import for clarity
+    try:
+        sys.stdout.write(json.dumps({
+            "decision": "block",
+            "reason": trail_mod.stop_question(),
+        }, ensure_ascii=False))
+        sys.stdout.flush()
+    except Exception:
+        pass
+    return 0
+
+
 def main() -> int:
     try:
         # Load .env BEFORE checking any GADFLY_* steering vars, so the
@@ -296,7 +403,10 @@ def main() -> int:
         if payload is None:
             return 0
 
-        if payload.get("hook_event_name") != "PostToolUse":
+        hook_event = payload.get("hook_event_name")
+        if hook_event == "Stop":
+            return _handle_stop(payload)
+        if hook_event != "PostToolUse":
             return 0
 
         tool_name = payload.get("tool_name")

@@ -47,3 +47,7 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # must neutralise the env var the .env file leaked in via
     # hook._load_env_file_once().
     monkeypatch.setenv("GADFLY_SHADOW", "0")
+    # Stop-event rubric default off (opt-in) but production .env may
+    # set it. Tests that exercise it flip explicitly.
+    monkeypatch.setenv("GADFLY_STOP", "0")
+    monkeypatch.setenv("GADFLY_STOP_FEEDBACK", "0")

@@ -39,6 +39,8 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
         journal_events = 0
         trail_events = 0
         trail_drifts = 0
+        stop_events = 0
+        stop_blocks = 0
         latest_ts: float | None = None
         last_tool: str | None = None
         try:
@@ -77,6 +79,15 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                             latest_ts = ts
                             last_tool = "trail"
                         continue
+                    if rec_type == "stop_verdict":
+                        stop_events += 1
+                        if rec.get("stop_appropriate") is False:
+                            stop_blocks += 1
+                        ts = rec.get("ts")
+                        if isinstance(ts, (int, float)) and (latest_ts is None or ts > latest_ts):
+                            latest_ts = ts
+                            last_tool = "stop"
+                        continue
                     count += 1
                     if rec.get("verdict", {}).get("professional") is False:
                         flagged += 1
@@ -95,6 +106,8 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                 "journal_events": journal_events,
                 "trail_events": trail_events,
                 "trail_drifts": trail_drifts,
+                "stop_events": stop_events,
+                "stop_blocks": stop_blocks,
                 "latest_ts": latest_ts,
                 "last_tool": last_tool,
             }
@@ -736,6 +749,7 @@ function renderSessions() {
         <span class="count">${s.count} verdicts</span>
         ${s.flagged > 0 ? `<span class="flagged">${s.flagged} flagged</span>` : ''}
         ${(s.trail_events||0) > 0 ? `<span>${s.trail_events} trail${(s.trail_drifts||0) > 0 ? ' · '+s.trail_drifts+' drift' : ''}</span>` : ''}
+        ${(s.stop_events||0) > 0 ? `<span>${s.stop_events} stop${(s.stop_blocks||0) > 0 ? ' · '+s.stop_blocks+' blocked' : ''}</span>` : ''}
         <span>${escapeHtml(s.last_tool || '')}</span>
       </div>
       <div class="meta">
@@ -913,6 +927,7 @@ function renderRecords(records) {
         || (r.type === "goal_distill" && r.error)
         || (r.type === "journal_update" && (r.error || r.skipped_reason))
         || (r.type === "trail_update" && (r.drift_detected || r.error))
+        || (r.type === "stop_verdict" && (r.stop_appropriate === false || r.error))
       )
     : scoped;
   const sig = JSON.stringify({sid: currentSession, tab: mainTab, kind: driftKindFilter, flagged: flaggedOnly, list: visible, total: currentTotal, loaded: loadedCount});
@@ -938,6 +953,7 @@ function renderRecords(records) {
     if (r.type === "goal_distill") return renderGoalEvent(r);
     if (r.type === "journal_update") return renderJournalEvent(r);
     if (r.type === "trail_update") return renderTrailEvent(r);
+    if (r.type === "stop_verdict") return renderStopEvent(r);
     const v = r.verdict || {};
     const pro = v.professional;
     const flagged = pro === false;
@@ -1129,6 +1145,72 @@ async function revokeFinding(fid) {
   const data = await r.json();
   if (!data.ok) { alert("revoke failed: " + (data.message || data.error)); return; }
   loadProject(currentProject);
+}
+
+// Canonical stop question — mirror of prompts.TRAIL_STOP_QUESTION so
+// the viewer can show what the agent actually saw on Stop-block.
+const TRAIL_STOP_QUESTION =
+  "Your work is being monitored, and you are about to stop. Before "
+  + "stopping, re-read the user's most recent ask and answer honestly:\n"
+  + "1. What did the user explicitly ask for? State it in one sentence.\n"
+  + "2. Walk down the asks: which parts have you ACTUALLY committed "
+  + "(landed in code / shipped output)? Which parts are still open?\n"
+  + "3. If anything is open — is there a reason you cannot finish it now? "
+  + "If there is no such reason, do NOT stop: finish the open work first.\n"
+  + "Ignore if the user explicitly approved partial delivery or asked "
+  + "for analysis-only.";
+
+function renderStopEvent(r) {
+  const failed = !!r.error;
+  const blocked = r.stop_appropriate === false;
+  const delivered = !!r.delivered_to_agent;
+  const cls = blocked ? "card trail drift" : "card trail";
+  let badge;
+  if (failed) {
+    badge = '<span class="badge warn">stop failed</span>';
+  } else if (blocked && delivered) {
+    badge = '<span class="badge bad">stop blocked → delivered</span>';
+  } else if (blocked) {
+    badge = '<span class="badge" style="background:rgba(240,138,138,0.18);color:#f08a8a;">premature stop</span>';
+  } else {
+    badge = '<span class="badge" style="background:rgba(111,207,151,0.18);color:#6fcf97;">stop ok</span>';
+  }
+  const missing = Array.isArray(r.missing_pieces) ? r.missing_pieces : [];
+  const missingHtml = missing.length === 0 ? '' : `
+    <div class="trail-body">
+      <div class="label">missing pieces</div>
+      <ul style="margin:0;padding-left:18px;font-size:12.5px;line-height:1.6;color:#f08a8a;">
+        ${missing.map(m => `<li>${escapeHtml(m)}</li>`).join('')}
+      </ul>
+    </div>`;
+  const reasoningHtml = r.reasoning ? `
+    <div class="trail-body">
+      <div class="label">audit reasoning</div>
+      <div style="font-size:12px;line-height:1.5;color:var(--muted);">${escapeHtml(r.reasoning)}</div>
+    </div>` : '';
+  const errHtml = failed ? `
+    <div class="verdict-msg error"><b>error:</b> ${escapeHtml(r.error)}</div>` : '';
+  const qHtml = blocked ? `
+    <div class="trail-drift-banner">
+      <details ${delivered ? 'open' : ''}>
+        <summary>${delivered ? 'Question forced to agent (decision: block)' : 'Question that would have been forced'}</summary>
+        <div class="question">${escapeHtml(TRAIL_STOP_QUESTION)}</div>
+      </details>
+    </div>` : '';
+  return `
+    <div class="${cls}">
+      <div class="head">
+        <span class="tool">stop</span>
+        ${badge}
+        <span class="ts">${fmtTs(r.ts)}</span>
+        <span class="lat">${fmtMs(r.latency_ms)}</span>
+      </div>
+      ${missingHtml}
+      ${reasoningHtml}
+      ${qHtml}
+      ${errHtml}
+    </div>
+  `;
 }
 
 async function loadJournalSnap(sha, targetId) {
