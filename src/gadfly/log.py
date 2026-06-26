@@ -312,6 +312,46 @@ def append_trail_event(
         pass
 
 
+def append_words_event(
+    *,
+    session_id: str,
+    event_context: str,
+    agent_text_preview: str,
+    lazy: bool,
+    lazy_kind: str | None,
+    lazy_markers: list[str],
+    reasoning: str,
+    delivered_to_agent: bool,
+    latency_ms: float | None,
+    error: str | None,
+) -> None:
+    """Append one words_verdict event. `event_context` is "PostToolUse"
+    or "Stop" — tells the viewer which event triggered the rubric.
+    Differentiated from other audit types by `type=words_verdict`.
+    """
+    try:
+        root = _root()
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{session_id or 'unknown'}.jsonl"
+        record = {
+            "type": "words_verdict",
+            "ts": time.time(),
+            "event_context": event_context,
+            "agent_text_preview": agent_text_preview[:400],
+            "lazy": bool(lazy),
+            "lazy_kind": lazy_kind,
+            "lazy_markers": list(lazy_markers),
+            "reasoning": reasoning,
+            "delivered_to_agent": bool(delivered_to_agent),
+            "latency_ms": latency_ms,
+            "error": error,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def append_stop_event(
     *,
     session_id: str,

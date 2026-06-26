@@ -51,3 +51,8 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # set it. Tests that exercise it flip explicitly.
     monkeypatch.setenv("GADFLY_STOP", "0")
     monkeypatch.setenv("GADFLY_STOP_FEEDBACK", "0")
+    # Words rubric default off in tests — production .env opts it on,
+    # but tests that exercise the words flow flip explicitly + mock
+    # the rubric.
+    monkeypatch.setenv("GADFLY_WORDS", "0")
+    monkeypatch.setenv("GADFLY_WORDS_FEEDBACK", "0")

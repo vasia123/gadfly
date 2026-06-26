@@ -339,13 +339,54 @@ def _handle_stop(payload: dict[str, Any]) -> int:
 
     feedback_on = os.environ.get("GADFLY_STOP_FEEDBACK", "0") == "1"
     shadow_on = os.environ.get("GADFLY_SHADOW", "0") == "1"
+
+    # Words rubric — read the agent's FINAL text. Different lens from
+    # the stop rubric (which asks "is user-asked work undone?"). Both
+    # can fire; stop takes priority when both flag the same Stop event
+    # because stop is more specific to the failure mode this event
+    # represents. When only words flags, words wins.
+    words_verdict = None
+    if (
+        os.environ.get("GADFLY_WORDS", "1") == "1"
+        and final_text
+    ):
+        try:
+            from . import trail as trail_mod  # noqa: F811
+            words_verdict = trail_mod.evaluate_words(
+                agent_text=final_text,
+                context_label="agent's final text at turn end",
+            )
+            try:
+                audit_log.append_words_event(
+                    session_id=session_id,
+                    event_context="Stop",
+                    agent_text_preview=final_text,
+                    lazy=words_verdict.lazy,
+                    lazy_kind=words_verdict.lazy_kind,
+                    lazy_markers=words_verdict.lazy_markers,
+                    reasoning=words_verdict.reasoning,
+                    delivered_to_agent=False,  # patched after gating
+                    latency_ms=words_verdict.latency_ms,
+                    error=words_verdict.error,
+                )
+            except Exception:
+                pass
+        except Exception:
+            words_verdict = None
+
     # Modal-SHADOW semantics: when SHADOW=1 the audit log still fills
     # but agent output is suppressed UNLESS the user explicitly opted
-    # into the stop feedback channel.
-    should_emit = (
-        (not verdict.stop_appropriate)
-        and feedback_on
-        and (not shadow_on or feedback_on)
+    # into a feedback channel.
+    words_feedback_on = (
+        os.environ.get("GADFLY_WORDS_FEEDBACK", "0") == "1"
+    )
+
+    stop_should_emit = (not verdict.stop_appropriate) and feedback_on
+    words_should_emit = (
+        words_verdict is not None
+        and words_verdict.lazy
+        and bool(words_verdict.lazy_markers)
+        and words_feedback_on
     )
 
     try:
@@ -354,25 +395,31 @@ def _handle_stop(payload: dict[str, Any]) -> int:
             stop_appropriate=verdict.stop_appropriate,
             reasoning=verdict.reasoning,
             missing_pieces=verdict.missing_pieces,
-            delivered_to_agent=bool(should_emit),
+            delivered_to_agent=bool(stop_should_emit),
             latency_ms=verdict.latency_ms,
             error=verdict.error,
         )
     except Exception:
         pass
 
-    if not should_emit:
+    if not (stop_should_emit or words_should_emit):
         return 0
 
-    # Force the agent to keep working. The `decision:"block"` JSON
-    # format is the documented Stop-hook way to override the natural
-    # stop with a guidance reason. The reason is the FIXED canonical
-    # question — the model's own reasoning never reaches the agent.
-    from . import trail as trail_mod  # noqa: F811 — local re-import for clarity
+    # Both stop and words can flag. Stop wins because the question it
+    # asks ("did you finish what the user asked?") is the canonical
+    # Stop-event question; words is the catch-all for purely-verbal
+    # laziness with no concrete missing pieces. When only words flags,
+    # words wins.
+    from . import trail as trail_mod  # noqa: F811
+    if stop_should_emit:
+        reason_text = trail_mod.stop_question()
+    else:
+        reason_text = trail_mod.words_question(words_verdict.lazy_kind)
+
     try:
         sys.stdout.write(json.dumps({
             "decision": "block",
-            "reason": trail_mod.stop_question(),
+            "reason": reason_text,
         }, ensure_ascii=False))
         sys.stdout.flush()
     except Exception:
@@ -483,13 +530,12 @@ def main() -> int:
                 # journal.update_for_action already logs its own errors.
                 pass
 
-        # Trail: longitudinal conceptual breadcrumbs. Independent of the
-        # journal (state vs. path lenses), runs on every PostToolUse, never
-        # raises. Default ON; rollback with GADFLY_TRAIL=0. Drift flags
-        # only reach the agent when GADFLY_TRAIL_FEEDBACK=1 (phase 2),
-        # which gates additionalContext composition below.
+        # Trail: longitudinal conceptual breadcrumbs. Default OFF since
+        # the words-rubric switch — words runs in its place. Set
+        # GADFLY_TRAIL=1 to keep breadcrumbs flowing alongside (powers
+        # the viewer trajectory chart).
         result_t = None
-        if os.environ.get("GADFLY_TRAIL", "1") == "1":
+        if os.environ.get("GADFLY_TRAIL", "0") == "1":
             try:
                 latest_user = (
                     ctx.recent_user_requests[-1]
@@ -516,6 +562,41 @@ def main() -> int:
                 # already swallows + audit-logs its own errors; this guard
                 # is belt-and-braces.
                 pass
+
+        # Words rubric: evaluate the agent's reasoning text (the
+        # `last_assistant_plan` immediately before this tool call) for
+        # linguistic markers of laziness. Default ON since the trail→words
+        # switch. Precision-leading by design — flags only when verbatim
+        # lazy phrases are present. See trail.evaluate_words.
+        result_w = None
+        if (
+            os.environ.get("GADFLY_WORDS", "1") == "1"
+            and ctx.last_assistant_plan
+        ):
+            try:
+                result_w = trail.evaluate_words(
+                    agent_text=ctx.last_assistant_plan,
+                    context_label="agent reasoning before this tool call",
+                )
+                try:
+                    audit_log.append_words_event(
+                        session_id=session_id,
+                        event_context="PostToolUse",
+                        agent_text_preview=ctx.last_assistant_plan,
+                        lazy=result_w.lazy,
+                        lazy_kind=result_w.lazy_kind,
+                        lazy_markers=result_w.lazy_markers,
+                        reasoning=result_w.reasoning,
+                        # delivered_to_agent set below once SHADOW/FEEDBACK
+                        # gating is computed — write the audit AFTER.
+                        delivered_to_agent=False,
+                        latency_ms=result_w.latency_ms,
+                        error=result_w.error,
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                result_w = None
 
         t0 = time.perf_counter()
         result = watchdog.evaluate(
@@ -573,11 +654,7 @@ def main() -> int:
                 hso["additionalContext"] = joined
                 hook_out["hookSpecificOutput"] = hso
 
-        # Trail drift flag (Phase 2 — gated by GADFLY_TRAIL_FEEDBACK=1).
-        # The trail layer decides deliverable (not suppressed); the hook
-        # decides whether to actually surface. The canonical Socratic
-        # question lives in `prompts.TRAIL_DRIFT_QUESTIONS` — the model's
-        # `drift_reasoning` is never sent to the agent.
+        # Trail drift flag (legacy; default off after the words switch).
         trail_msg = ""
         if (
             os.environ.get("GADFLY_TRAIL_FEEDBACK", "0") == "1"
@@ -591,6 +668,23 @@ def main() -> int:
                 )
             except Exception:
                 trail_msg = ""
+
+        # Words flag — the primary active channel since the trail switch.
+        # Reaches the agent when GADFLY_WORDS_FEEDBACK=1 AND the rubric
+        # actually flagged lazy=true with non-empty markers (which is the
+        # in-rubric suppression gate — markerless flags are dropped to
+        # lazy=false during verdict construction).
+        words_msg = ""
+        if (
+            os.environ.get("GADFLY_WORDS_FEEDBACK", "0") == "1"
+            and result_w is not None
+            and result_w.lazy
+            and result_w.lazy_markers
+        ):
+            try:
+                words_msg = trail.words_question(result_w.lazy_kind)
+            except Exception:
+                words_msg = ""
         if trail_msg:
             if hook_out is None:
                 hook_out = {
@@ -606,31 +700,76 @@ def main() -> int:
                 hso["additionalContext"] = joined
                 hook_out["hookSpecificOutput"] = hso
 
-        # SHADOW mode: hook runs everything (journal, trail, watchdog) and
-        # writes the full audit trail to disk, but suppresses agent-facing
-        # output. Two levels:
-        #
-        #   GADFLY_SHADOW=1, GADFLY_TRAIL_FEEDBACK=0
-        #     full shadow — nothing reaches the agent. Use during
-        #     trail-rubric eyeball validation.
-        #
-        #   GADFLY_SHADOW=1, GADFLY_TRAIL_FEEDBACK=1
-        #     watchdog + journal phase-C output dropped; trail's
-        #     pre-canned Socratic question (TRAIL_DRIFT_QUESTIONS[kind])
-        #     still reaches the agent. This is the explicit-channel mode
-        #     the user opted in for: the agent ONLY ever hears the
-        #     fixed, well-crafted Einstein question — no variable
-        #     model-generated critique.
-        if os.environ.get("GADFLY_SHADOW", "0") == "1":
-            if trail_msg:
+        # Words flag delivery — same merge semantics as trail.
+        if words_msg:
+            if hook_out is None:
                 hook_out = {
                     "hookSpecificOutput": {
                         "hookEventName": "PostToolUse",
-                        "additionalContext": trail_msg,
+                        "additionalContext": words_msg,
+                    }
+                }
+            else:
+                hso = hook_out.get("hookSpecificOutput", {}) or {}
+                prior = hso.get("additionalContext") or ""
+                joined = (prior + "\n\n" + words_msg) if prior else words_msg
+                hso["additionalContext"] = joined
+                hook_out["hookSpecificOutput"] = hso
+
+        # SHADOW mode: hook runs everything (journal, words, watchdog,
+        # optionally trail) and writes the full audit trail, but
+        # suppresses agent-facing output EXCEPT for the explicit-channel
+        # canonical questions:
+        #
+        #   GADFLY_SHADOW=1 alone           → full shadow, nothing reaches
+        #                                     the agent.
+        #   GADFLY_SHADOW=1 + WORDS_FEEDBACK=1 → only the WORDS canonical
+        #                                     question goes through.
+        #   GADFLY_SHADOW=1 + TRAIL_FEEDBACK=1 → only the TRAIL canonical
+        #                                     question goes through (legacy).
+        #   GADFLY_SHADOW=1 + both feedbacks  → both go through.
+        #
+        # Watchdog's variable text + Phase-C priors are dropped under
+        # shadow even when their own gates would have emitted — they
+        # carry model-generated prose which is the noise the user
+        # turned the hook off for.
+        if os.environ.get("GADFLY_SHADOW", "0") == "1":
+            ctx_parts: list[str] = []
+            if words_msg:
+                ctx_parts.append(words_msg)
+            if trail_msg:
+                ctx_parts.append(trail_msg)
+            if ctx_parts:
+                hook_out = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": "\n\n".join(ctx_parts),
                     }
                 }
             else:
                 hook_out = None
+
+        # Update audit-log delivery flag for the words verdict — we
+        # know now (post-shadow) whether it actually reached the agent.
+        if result_w is not None and result_w.lazy and words_msg and (
+            os.environ.get("GADFLY_SHADOW", "0") != "1" or words_msg
+        ):
+            try:
+                audit_log.append_words_event(
+                    session_id=session_id,
+                    event_context="PostToolUse_delivery",
+                    agent_text_preview=ctx.last_assistant_plan or "",
+                    lazy=result_w.lazy,
+                    lazy_kind=result_w.lazy_kind,
+                    lazy_markers=result_w.lazy_markers,
+                    reasoning="(delivery audit — see prior PostToolUse "
+                              "words_verdict for the rubric output)",
+                    delivered_to_agent=bool(hook_out and words_msg),
+                    latency_ms=0.0,
+                    error=None,
+                )
+            except Exception:
+                pass
 
         _emit_hook_output(hook_out)
 

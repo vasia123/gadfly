@@ -415,11 +415,81 @@ only. Belt-and-braces: `tool_name == "Task"` is also not in
 
 | env var                     | default | effect                                  |
 |-----------------------------|---------|-----------------------------------------|
-| `GADFLY_TRAIL`              | `1`     | trail runs on every PostToolUse         |
-| `GADFLY_TRAIL_FEEDBACK`     | `0`     | drift questions reach agent (Phase 2)   |
+| `GADFLY_TRAIL`              | `0`     | trail runs on every PostToolUse (DORMANT after words switch) |
+| `GADFLY_TRAIL_FEEDBACK`     | `0`     | drift questions reach agent (legacy)    |
+| `GADFLY_WORDS`              | `1`     | words rubric reads agent text on PostToolUse + Stop |
+| `GADFLY_WORDS_FEEDBACK`     | `0`     | canonical words question reaches agent  |
 | `GADFLY_SHADOW`             | `0`     | hook silences watchdog + phase-C output |
 | `GADFLY_STOP`               | `0`     | Stop hook runs stop-completion rubric   |
 | `GADFLY_STOP_FEEDBACK`      | `0`     | `decision:block` forces agent to keep going |
+
+## The words rubric (primary active channel)
+
+The trail rubric reads the AGENT'S ACTIONS. The words rubric reads the
+AGENT'S OWN TEXT — the assistant_reasoning before a tool call and the
+final assistant text at Stop. Switched ON as the primary feedback
+channel after dnd-llm dogfood validation:
+
+  Words rubric:  100% precision (0/10 false flags on negatives)
+                  28.6% recall (caught 2/7 lazy moments)
+  Trail rubric:  17% precision (20/24 false flags on negatives)
+                  86% recall (caught 6/7 same lazy moments)
+
+The user repeatedly complained about watchdog noise; words sacrifices
+recall for precision-leading silence. Missed lazy moments are recovered
+either by the Stop rubric at turn end or by the user noticing directly.
+
+### Mechanism
+
+`trail.evaluate_words_async` takes an `agent_text` string + a
+`context_label` and asks the model:
+  Does this text show one of the 5 lazy_kinds?
+    deferral / premature_declaration / outsourcing /
+    self_narrowing / other
+  Markers MUST be verbatim quotes from the text.
+
+Citation hygiene: a lazy=true verdict with empty `lazy_markers` is
+downgraded to lazy=false at construction time inside
+`_build_words_verdict_from_payload`. No verbatim quote = unverifiable
+flag = suppressed.
+
+On flag delivery the agent sees the canonical Socratic question from
+`prompts.WORDS_DRIFT_QUESTIONS[kind]` — never the model's own
+`reasoning`. Same controlled-channel architecture as trail/stop.
+
+### Triggers
+
+PostToolUse: evaluates `ctx.last_assistant_plan` (the assistant text
+that came WITH the tool call). The question reaches the agent in
+`hookSpecificOutput.additionalContext` when `GADFLY_WORDS_FEEDBACK=1`.
+
+Stop: evaluates the final assistant text. Runs ALONGSIDE the existing
+stop-completion rubric. Stop wins when both flag (its question is
+more specific); words wins when only it flags.
+
+### Audit type
+
+`words_verdict` records carry `event_context` ("PostToolUse" /
+"Stop" / "PostToolUse_delivery"), `agent_text_preview` (≤400c),
+`lazy`, `lazy_kind`, `lazy_markers`, `reasoning`,
+`delivered_to_agent`, `latency_ms`, `error`. The `_delivery` echo
+exists so the audit log records what actually reached the agent
+after shadow/feedback gating; the viewer dedupes these to one card
+per rubric call.
+
+### Replay
+
+The dogfood benchmark lives in `tests/fixtures/wrong_level_corpus/`:
+  cases_24h_words.json          — 7 LAZY_WORDS positives
+  cases_24h_words_negative.json — 10 NEUTRAL negatives
+  vetted_24h_words.json         — hand-curated ground truth
+
+Run baseline:
+  set -a && source .env && set +a
+  .venv/bin/python scripts/run_words_corpus.py \
+    --positive tests/fixtures/wrong_level_corpus/cases_24h_words.json \
+    --negative tests/fixtures/wrong_level_corpus/cases_24h_words_negative.json \
+    --out /tmp/words_baseline.json
 
 `SHADOW=1` + `TRAIL_FEEDBACK=1` is a third meaningful mode: the
 ONLY thing the agent ever hears is the trail's fixed canonical

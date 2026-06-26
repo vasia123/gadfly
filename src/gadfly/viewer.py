@@ -41,6 +41,8 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
         trail_drifts = 0
         stop_events = 0
         stop_blocks = 0
+        words_events = 0
+        words_lazy = 0
         latest_ts: float | None = None
         last_tool: str | None = None
         # Cwd is extracted from the first record carrying it — usually
@@ -93,6 +95,19 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                             latest_ts = ts
                             last_tool = "stop"
                         continue
+                    if rec_type == "words_verdict":
+                        # Skip the post-delivery audit echo so we count
+                        # one event per rubric call.
+                        if rec.get("event_context") == "PostToolUse_delivery":
+                            continue
+                        words_events += 1
+                        if rec.get("lazy") is True:
+                            words_lazy += 1
+                        ts = rec.get("ts")
+                        if isinstance(ts, (int, float)) and (latest_ts is None or ts > latest_ts):
+                            latest_ts = ts
+                            last_tool = "words"
+                        continue
                     count += 1
                     if rec.get("verdict", {}).get("professional") is False:
                         flagged += 1
@@ -121,6 +136,8 @@ def _list_sessions(log_dir: Path) -> list[dict[str, Any]]:
                 "trail_drifts": trail_drifts,
                 "stop_events": stop_events,
                 "stop_blocks": stop_blocks,
+                "words_events": words_events,
+                "words_lazy": words_lazy,
                 "latest_ts": latest_ts,
                 "earliest_ts": earliest_ts,
                 "cwd": session_cwd,
@@ -752,6 +769,77 @@ const LEVEL_COLOR = {
   unclear: '#3d434f',
 };
 
+// Canonical words questions, mirrored from prompts.WORDS_DRIFT_QUESTIONS.
+const WORDS_DRIFT_QUESTIONS = {
+  deferral:
+    "Your work is being monitored. The text you just wrote contains deferral phrasing (\"for now\", \"later\", \"next session\", \"свежим окном\", \"правильным путём\"). Stop and answer honestly:\n"
+    + "1. Quote the specific deferral phrase. Is the deferred work blocked by something external, or are you just choosing to stop here?\n"
+    + "2. \"Fresh window\" / \"next session\" framing is comfortable but expensive. What is the actual cost of doing the deferred step NOW versus rebuilding context later?\n"
+    + "3. If there is no external blocker — do the work in this turn. If there is — name it explicitly.\n"
+    + "Ignore if the user explicitly approved the partial delivery.",
+  premature_declaration:
+    "Your work is being monitored. You just declared something done (\"fixed\", \"closed\", \"ready\", \"stack up\", \"N commits\"). Stop and verify honestly:\n"
+    + "1. Quote the declaration. What evidence backs it — a test run, a specific command output, a verified behavior?\n"
+    + "2. If you cited stats (commits, builds green) — those measure ACTIVITY, not OUTCOMES. Did you verify the actual bug or feature behavior?\n"
+    + "3. If you cannot name verification evidence, the declaration is premature. Run the verification before claiming victory.\n"
+    + "Ignore if you genuinely verified and named the evidence.",
+  outsourcing:
+    "Your work is being monitored. The text you just wrote asks the user to make a decision (\"which?\", \"want me to also?\", \"нужно твоё решение\", \"тут реальный дизайн-вопрос\"). Stop and answer honestly:\n"
+    + "1. Quote the choice you're asking the user to make.\n"
+    + "2. Is the answer clear from the user's stated goal or from the project's existing patterns? If yes — make the decision yourself and proceed.\n"
+    + "3. If the user genuinely needs to choose (irreversible cost, business preference, real tradeoff) — make your RECOMMENDATION explicit BEFORE asking, then let them confirm.\n"
+    + "Ignore if the decision genuinely costs the user (money, data loss, business policy).",
+  self_narrowing:
+    "Your work is being monitored. The text you just wrote shrinks the scope (\"simpler approach\", \"starting point\", \"minimal version\", \"начну с\"). Stop and answer honestly:\n"
+    + "1. Did the user ask for a minimal version, or did you decide to narrow the scope?\n"
+    + "2. What is LOST in the simpler version? Will the user accept the loss when they see the result?\n"
+    + "3. If the user did not ask to simplify — do the full thing.\n"
+    + "Ignore if the user explicitly approved a first pass.",
+  other:
+    "Your work is being monitored. The text you just wrote shows linguistic markers of laziness. Stop and answer honestly:\n"
+    + "1. Read what you just wrote. Is it concrete commitment, or hedging / outsourcing / deferral?\n"
+    + "2. If hedging — what is the concrete next step?\n"
+    + "3. Execute that step before continuing.\n"
+    + "Ignore if the language is genuinely appropriate to the context.",
+};
+
+function wordsQuestion(kind) {
+  return WORDS_DRIFT_QUESTIONS[kind] || WORDS_DRIFT_QUESTIONS.other;
+}
+
+function renderWordsList(records) {
+  if (records.length === 0) {
+    return '<div class="moments-empty">No lazy phrases caught — the agent\'s words are clean.</div>';
+  }
+  return records.slice().reverse().map(r => {
+    const kind = r.lazy_kind || 'other';
+    const delivered = !!r.delivered_to_agent;
+    const stateClass = delivered ? 'delivered' : 'silent';
+    const stateLabel = delivered ? 'delivered' : 'logged only';
+    const ctxLabel = r.event_context === 'Stop' ? 'stop' : 'edit';
+    const markers = Array.isArray(r.lazy_markers) ? r.lazy_markers : [];
+    const markersHtml = markers.length === 0 ? '' :
+      `<div class="moment-reason"><b>verbatim:</b> ${markers.map(m => `<i>"${escapeHtml(m)}"</i>`).join(' · ')}</div>`;
+    const reasoningHtml = r.reasoning ?
+      `<div class="moment-reason">${escapeHtml(r.reasoning)}</div>` : '';
+    const previewHtml = r.agent_text_preview ?
+      `<div class="moment-reason"><b>agent text:</b> <span style="color:var(--ink);font-style:italic">${escapeHtml(r.agent_text_preview.slice(0, 300))}${r.agent_text_preview.length > 300 ? '…' : ''}</span></div>` : '';
+    const question = wordsQuestion(kind);
+    return `<article class="moment">
+      <div class="moment-head">
+        <span class="moment-id">${escapeHtml(ctxLabel)}</span>
+        <span class="moment-kind">${escapeHtml(kind)}</span>
+        <span class="moment-state ${stateClass}">${stateLabel}</span>
+        <span class="moment-time">${escapeHtml(fmtClock(r.ts))}</span>
+      </div>
+      ${previewHtml}
+      ${markersHtml}
+      ${reasoningHtml}
+      <div class="moment-question">${escapeHtml(question)}</div>
+    </article>`;
+  }).join('');
+}
+
 const TRAIL_DRIFT_QUESTIONS = {
   hardcoded_instance: "The instance you just fixed — it's a specific case of WHAT? Name the class. Where in the codebase does that class already have a slot? If the slot exists, route the next patch through it. If not, create one before adding the next patch.",
   premature_ceiling: "You climbed one abstraction level (instance → class) and stopped. What level above the class would the architectural fix live at? Does that slot already exist? If yes — why are you patching class-level instead of routing through architecture?",
@@ -951,6 +1039,9 @@ function sessionMeta(sid) {
   const verdicts = recs.filter(r => (r.type || 'verdict') === 'verdict');
   const actions = verdicts.length;
   const flagged = verdicts.filter(r => r.verdict && r.verdict.professional === false).length;
+  const wordsEvents = recs.filter(r => r.type === 'words_verdict' && r.event_context !== 'PostToolUse_delivery');
+  const wordsLazy = wordsEvents.filter(r => r.lazy).length;
+  const wordsDelivered = wordsEvents.filter(r => r.lazy && r.delivered_to_agent).length;
   const driftEvents = recs.filter(r => r.type === 'trail_update' && r.drift_detected);
   const drifts = driftEvents.length;
   const driftsDelivered = driftEvents.filter(r => r.delivered_to_agent).length;
@@ -963,7 +1054,8 @@ function sessionMeta(sid) {
     const carrier = recs.find(r => r.payload && r.payload.cwd);
     if (carrier) cwd = carrier.payload.cwd;
   }
-  return { startTs, endTs, actions, flagged, drifts, driftsDelivered, stops, stopsBlocked, cwd };
+  return { startTs, endTs, actions, flagged, drifts, driftsDelivered,
+           stops, stopsBlocked, wordsEvents, wordsLazy, wordsDelivered, cwd };
 }
 
 function renderCanvas(scrollReset) {
@@ -1001,11 +1093,11 @@ function renderCanvas(scrollReset) {
           <span class="vital-l">actions</span>
         </div>
         <div class="vital">
-          <span class="vital-n ${meta.drifts ? 'alert' : 'dim'}">${meta.drifts}</span>
-          <span class="vital-l">drifts caught</span>
+          <span class="vital-n ${meta.wordsLazy ? 'alert' : 'dim'}">${meta.wordsLazy || 0}</span>
+          <span class="vital-l">lazy phrases</span>
         </div>
         <div class="vital">
-          <span class="vital-n ${meta.driftsDelivered ? 'good' : 'dim'}">${meta.driftsDelivered}</span>
+          <span class="vital-n ${meta.wordsDelivered ? 'good' : 'dim'}">${meta.wordsDelivered || 0}</span>
           <span class="vital-l">delivered</span>
         </div>
         <div class="vital">
@@ -1022,12 +1114,27 @@ function renderCanvas(scrollReset) {
     <div class="chart-wrap">${renderChart()}</div>
   </section>`;
 
-  // Drifts
-  const driftRecords = state.records.filter(r => r.type === 'trail_update' && r.drift_detected);
+  // Lazy phrases (words rubric) — primary active channel since the
+  // trail→words switch. Shows the verbatim agent_text excerpt that
+  // triggered the flag along with the markers the model cited.
+  const wordsRecords = state.records.filter(r =>
+    r.type === 'words_verdict'
+    && r.event_context !== 'PostToolUse_delivery'
+    && r.lazy
+  );
   html += `<section class="section">
-    <h3 class="section-title">Drift moments <span class="count">${driftRecords.length}</span></h3>
-    ${renderDrifts(driftRecords)}
+    <h3 class="section-title">Lazy phrases <span class="count">${wordsRecords.length}</span></h3>
+    ${renderWordsList(wordsRecords)}
   </section>`;
+
+  // Drifts (legacy trail — usually empty after the switch)
+  const driftRecords = state.records.filter(r => r.type === 'trail_update' && r.drift_detected);
+  if (driftRecords.length > 0) {
+    html += `<section class="section">
+      <h3 class="section-title">Trail drift <span class="count">${driftRecords.length}</span></h3>
+      ${renderDrifts(driftRecords)}
+    </section>`;
+  }
 
   // Stops
   if (meta.stops.length > 0) {

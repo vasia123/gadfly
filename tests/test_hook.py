@@ -378,6 +378,205 @@ def test_stop_hook_no_user_request_stays_silent(monkeypatch, tmp_log_dir: Path):
     assert called["n"] == 0
 
 
+def _make_words_verdict(lazy, kind=None, markers=None):
+    from gadfly import trail as trail_mod
+    return trail_mod.WordsVerdict(
+        lazy=lazy,
+        lazy_kind=kind,
+        lazy_markers=list(markers or []),
+        reasoning="audit-only model text",
+        delivered_to_agent=False,
+        error=None,
+        latency_ms=12.3,
+        raw_payload={"lazy": lazy},
+    )
+
+
+def test_words_hook_no_op_when_disabled(monkeypatch, tmp_log_dir: Path):
+    """GADFLY_WORDS=0 → no rubric call on PostToolUse, no audit line."""
+    from gadfly import trail as trail_mod
+    monkeypatch.setenv("GADFLY_WORDS", "0")
+    called = {"n": 0}
+    def _spy(**kw):
+        called["n"] += 1
+        return _make_words_verdict(False)
+    monkeypatch.setattr(trail_mod, "evaluate_words", _spy)
+    with patch.object(
+        hook.watchdog, "evaluate",
+        return_value=EvaluationResult(Verdict.silent_ok(), None),
+    ):
+        rc, _ = _run_hook(
+            monkeypatch,
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "a", "old_string": "x", "new_string": "y"},
+                "tool_response": {"success": True},
+                "session_id": "words-off",
+                "transcript_path": "",
+            },
+        )
+    assert rc == 0
+    assert called["n"] == 0
+    log_path = tmp_log_dir / "words-off.jsonl"
+    if log_path.exists():
+        # If any record was written, it must not be words_verdict.
+        for line in log_path.read_text().splitlines():
+            rec = json.loads(line)
+            assert rec.get("type") != "words_verdict"
+
+
+def test_words_hook_lazy_delivered_under_shadow_feedback(monkeypatch, tmp_log_dir: Path):
+    """SHADOW=1 + WORDS_FEEDBACK=1: only the canonical words question
+    reaches the agent. Watchdog's variable text is suppressed."""
+    from gadfly import session as session_mod
+    from gadfly import trail as trail_mod
+    from gadfly.prompts import WORDS_DRIFT_QUESTIONS
+
+    monkeypatch.setenv("GADFLY_WORDS", "1")
+    monkeypatch.setenv("GADFLY_WORDS_FEEDBACK", "1")
+    monkeypatch.setenv("GADFLY_SHADOW", "1")
+
+    real_load = session_mod.load
+    def _patched_load(*args, **kwargs):
+        ctx = real_load(*args, **kwargs)
+        # Substantive reasoning text — words rubric needs ≥40 chars.
+        ctx.last_assistant_plan = (
+            "Let me just stub the parser for now, we can come back to it later."
+        )
+        return ctx
+    monkeypatch.setattr(session_mod, "load", _patched_load)
+
+    monkeypatch.setattr(
+        trail_mod, "evaluate_words",
+        lambda **kw: _make_words_verdict(
+            lazy=True, kind="deferral",
+            markers=["I'll just stub", "for now", "come back to it later"],
+        ),
+    )
+
+    watchdog_verdict = Verdict(
+        professional=False, reason="watchdog noise", suggestion="don't show",
+    )
+    with patch.object(
+        hook.watchdog, "evaluate",
+        return_value=EvaluationResult(watchdog_verdict, None),
+    ):
+        rc, out = _run_hook(
+            monkeypatch,
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "a", "old_string": "x", "new_string": "y"},
+                "tool_response": {"success": True},
+                "session_id": "words-shadow",
+                "transcript_path": "",
+            },
+        )
+    assert rc == 0
+    payload = json.loads(out)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert ctx == WORDS_DRIFT_QUESTIONS["deferral"]
+    # Watchdog's variable text MUST NOT leak.
+    assert "watchdog noise" not in ctx
+    assert "don't show" not in ctx
+
+
+def test_words_hook_neutral_stays_silent(monkeypatch, tmp_log_dir: Path):
+    from gadfly import session as session_mod
+    from gadfly import trail as trail_mod
+
+    monkeypatch.setenv("GADFLY_WORDS", "1")
+    monkeypatch.setenv("GADFLY_WORDS_FEEDBACK", "1")
+    monkeypatch.setenv("GADFLY_SHADOW", "1")
+
+    real_load = session_mod.load
+    def _patched_load(*args, **kwargs):
+        ctx = real_load(*args, **kwargs)
+        ctx.last_assistant_plan = "Added parser at parser.go:14, ran tests, all green."
+        return ctx
+    monkeypatch.setattr(session_mod, "load", _patched_load)
+    monkeypatch.setattr(
+        trail_mod, "evaluate_words",
+        lambda **kw: _make_words_verdict(False),
+    )
+
+    with patch.object(
+        hook.watchdog, "evaluate",
+        return_value=EvaluationResult(Verdict.silent_ok(), None),
+    ):
+        rc, out = _run_hook(
+            monkeypatch,
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "a", "old_string": "x", "new_string": "y"},
+                "tool_response": {"success": True},
+                "session_id": "words-neutral",
+                "transcript_path": "",
+            },
+        )
+    assert rc == 0
+    assert out == ""
+
+
+def test_words_hook_markerless_lazy_is_suppressed(monkeypatch, tmp_log_dir: Path):
+    """A verdict carrying lazy=true with NO markers is suppressed at
+    verdict-construction time inside trail.evaluate_words. The hook
+    must see lazy=false coming out and stay silent."""
+    from gadfly import session as session_mod
+    from gadfly import trail as trail_mod
+
+    monkeypatch.setenv("GADFLY_WORDS", "1")
+    monkeypatch.setenv("GADFLY_WORDS_FEEDBACK", "1")
+    monkeypatch.setenv("GADFLY_SHADOW", "1")
+
+    real_load = session_mod.load
+    def _patched_load(*args, **kwargs):
+        ctx = real_load(*args, **kwargs)
+        ctx.last_assistant_plan = "Some text long enough to evaluate." * 2
+        return ctx
+    monkeypatch.setattr(session_mod, "load", _patched_load)
+
+    # The verdict construction (inside the real evaluate_words) would
+    # downgrade lazy=true+no-markers to lazy=false. We bypass and feed
+    # the post-construction verdict here.
+    monkeypatch.setattr(
+        trail_mod, "evaluate_words",
+        lambda **kw: _make_words_verdict(False),  # markerless → already coerced
+    )
+
+    with patch.object(
+        hook.watchdog, "evaluate",
+        return_value=EvaluationResult(Verdict.silent_ok(), None),
+    ):
+        rc, out = _run_hook(
+            monkeypatch,
+            {
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Edit",
+                "tool_input": {"file_path": "a", "old_string": "x", "new_string": "y"},
+                "tool_response": {"success": True},
+                "session_id": "words-no-markers",
+                "transcript_path": "",
+            },
+        )
+    assert rc == 0
+    assert out == ""
+
+
+def test_words_verdict_constructor_drops_markerless_lazy():
+    """Defense in depth: trail._build_words_verdict_from_payload must
+    downgrade lazy=true+markers=[] to lazy=false at construction time."""
+    from gadfly.trail import _build_words_verdict_from_payload
+    v = _build_words_verdict_from_payload(
+        {"lazy": True, "lazy_kind": "deferral", "lazy_markers": []},
+        latency_ms=1.0,
+    )
+    assert v.lazy is False
+    assert "suppressed" in v.reasoning
+
+
 def test_hook_writes_heartbeat_for_historian(monkeypatch, tmp_log_dir: Path):
     """H2: every PostToolUse on a watched tool drops a heartbeat tick
     keyed by encoded cwd. The daemon picks these up to know which

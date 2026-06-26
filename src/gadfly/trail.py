@@ -62,6 +62,9 @@ from .prompts import (
     EVALUATE_STOP_DESCRIPTION,
     EVALUATE_STOP_INPUT_SCHEMA,
     EVALUATE_STOP_JSON_SCHEMA,
+    EVALUATE_WORDS_DESCRIPTION,
+    EVALUATE_WORDS_INPUT_SCHEMA,
+    EVALUATE_WORDS_JSON_SCHEMA,
     STOP_RUBRIC_SYSTEM_PROMPT,
     TRAIL_DRIFT_QUESTIONS,
     TRAIL_STOP_QUESTION,
@@ -69,6 +72,8 @@ from .prompts import (
     UPDATE_TRAIL_DESCRIPTION,
     UPDATE_TRAIL_INPUT_SCHEMA,
     UPDATE_TRAIL_JSON_SCHEMA,  # noqa: F401  — re-exported for backends
+    WORDS_DRIFT_QUESTIONS,
+    WORDS_RUBRIC_SYSTEM_PROMPT,
 
 
 )
@@ -1247,3 +1252,275 @@ def stop_question() -> str:
     stop rubric flags premature_stop. Single fixed string — the model's
     own reasoning never reaches the agent."""
     return TRAIL_STOP_QUESTION
+
+
+# --- Words rubric ----------------------------------------------------------
+
+
+_VALID_LAZY_KINDS = frozenset({
+    "deferral", "premature_declaration",
+    "outsourcing", "self_narrowing", "other",
+})
+
+
+def _coerce_lazy_kind(value: Any) -> str | None:
+    if isinstance(value, str) and value in _VALID_LAZY_KINDS:
+        return value
+    return None
+
+
+@dataclass(frozen=True)
+class WordsVerdict:
+    lazy: bool
+    lazy_kind: str | None
+    lazy_markers: list[str]
+    reasoning: str
+    delivered_to_agent: bool
+    error: str | None
+    latency_ms: float
+    raw_payload: dict[str, Any] | None
+
+
+def _render_words_user_message(
+    agent_text: str,
+    *,
+    context_label: str = "agent text",
+    json_mode: bool = False,
+) -> str:
+    """Compose the user message for the words rubric. `context_label`
+    distinguishes whether the text was the assistant_reasoning before a
+    tool call (PostToolUse) or the final assistant text (Stop)."""
+    from .prompts import _WORDS_OUTPUT_FORMAT_SUFFIX
+    parts = [
+        f"## {context_label} (evaluate this for laziness markers)",
+        _clip(agent_text, 3500),
+        "## Task",
+        "Apply the rubric. Default lazy=false when uncertain. When you "
+        "flag lazy=true, `lazy_markers` MUST contain verbatim phrases "
+        "from the text above.",
+    ]
+    msg = "\n\n".join(parts)
+    if json_mode:
+        msg += _WORDS_OUTPUT_FORMAT_SUFFIX
+    return msg
+
+
+def _build_words_tool(captured: _Captured):
+    @tool(
+        "evaluate_words",
+        EVALUATE_WORDS_DESCRIPTION,
+        EVALUATE_WORDS_INPUT_SCHEMA,
+    )
+    async def evaluate_words(args: dict[str, Any]) -> dict[str, Any]:
+        captured.payload = args
+        return {"content": [{"type": "text", "text": "words recorded"}]}
+
+    return evaluate_words
+
+
+def _build_words_options(captured: _Captured, model: str) -> ClaudeAgentOptions:
+    server = create_sdk_mcp_server(
+        "gadfly_words",
+        "1.0.0",
+        [_build_words_tool(captured)],
+    )
+    return ClaudeAgentOptions(
+        model=model,
+        system_prompt=WORDS_RUBRIC_SYSTEM_PROMPT,
+        mcp_servers={"gadfly_words": server},
+        allowed_tools=["mcp__gadfly_words__evaluate_words"],
+        permission_mode="bypassPermissions",
+        setting_sources=[],
+        settings="{}",
+        thinking=ThinkingConfigDisabled(type="disabled"),
+        max_turns=2,
+        env={"GADFLY_INTERNAL": "1"},
+    )
+
+
+async def _evaluate_words_sdk(
+    *,
+    user_message: str,
+    model: str,
+    timeout_s: float,
+    run_query: RunQuery,
+) -> tuple[dict[str, Any] | None, str | None]:
+    captured = _Captured()
+    options = _build_words_options(captured, model)
+    try:
+        await asyncio.wait_for(
+            run_query(user_message, options), timeout=timeout_s
+        )
+    except asyncio.TimeoutError:
+        return None, f"timeout after {timeout_s}s"
+    except FileNotFoundError as exc:
+        return None, f"claude CLI not found: {exc!s}"
+    except Exception as exc:
+        return None, f"agent-sdk error: {exc!r}"
+    if captured.payload is None:
+        return None, "model did not call evaluate_words"
+    return captured.payload, None
+
+
+async def _evaluate_words_oai(
+    *,
+    backend,
+    user_message: str,
+    model: str,
+    timeout_s: float,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        br = await backend.evaluate(
+            system_prompt=WORDS_RUBRIC_SYSTEM_PROMPT,
+            user_message=user_message,
+            model=model,
+            tool_name="evaluate_words",
+            tool_description=EVALUATE_WORDS_DESCRIPTION,
+            tool_parameters=EVALUATE_WORDS_JSON_SCHEMA,
+            timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        return None, f"backend error: {exc!r}"
+    if br.verdict_args is None:
+        return None, br.error or "no payload"
+    return dict(br.verdict_args), None
+
+
+def _conservative_words_verdict(error: str, latency_ms: float) -> WordsVerdict:
+    """When the rubric fails, default to lazy=false. Forcing the agent
+    to defend itself against a model error is the more expensive
+    failure mode than missing one lazy moment."""
+    return WordsVerdict(
+        lazy=False,
+        lazy_kind=None,
+        lazy_markers=[],
+        reasoning=f"(rubric failed: {error})"[:400],
+        delivered_to_agent=False,
+        error=error,
+        latency_ms=latency_ms,
+        raw_payload=None,
+    )
+
+
+def _build_words_verdict_from_payload(
+    payload: dict[str, Any], latency_ms: float,
+) -> WordsVerdict:
+    lazy = bool(payload.get("lazy", False))
+    kind = _coerce_lazy_kind(payload.get("lazy_kind"))
+    markers_raw = payload.get("lazy_markers") or []
+    markers: list[str] = []
+    if isinstance(markers_raw, list):
+        for m in markers_raw[:5]:
+            if isinstance(m, str) and m.strip():
+                markers.append(m.strip()[:200])
+    reasoning = str(payload.get("reasoning") or "")[:600]
+    # Citation hygiene — same defense as trail drift. lazy=true without
+    # verbatim markers is unverifiable and gets suppressed at delivery
+    # time. We keep the verdict for audit but the hook will not deliver.
+    if lazy and not markers:
+        lazy = False
+        if not reasoning:
+            reasoning = "(suppressed: lazy=true claimed without markers)"
+    if lazy and kind is None:
+        kind = "other"
+    return WordsVerdict(
+        lazy=lazy,
+        lazy_kind=kind,
+        lazy_markers=markers,
+        reasoning=reasoning,
+        delivered_to_agent=False,
+        error=None,
+        latency_ms=latency_ms,
+        raw_payload=dict(payload),
+    )
+
+
+async def evaluate_words_async(
+    *,
+    agent_text: str,
+    context_label: str = "agent text",
+    model: str | None = None,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    backend: Any = None,
+    run_query: RunQuery | None = None,
+) -> WordsVerdict:
+    """Async core for the words rubric. Returns a WordsVerdict. Never
+    raises — caller (hook) treats failure as conservative no-flag."""
+    if not agent_text or len(agent_text.strip()) < 40:
+        # Nothing substantive to evaluate. The rubric needs ≥40 chars
+        # of agent text to make a meaningful call. Sub-threshold inputs
+        # are treated as silent — this avoids charging an LLM call for
+        # one-word acknowledgements.
+        return WordsVerdict(
+            lazy=False, lazy_kind=None, lazy_markers=[],
+            reasoning="(text too short for evaluation)",
+            delivered_to_agent=False, error=None,
+            latency_ms=0.0, raw_payload=None,
+        )
+
+    t0 = time.perf_counter()
+    json_mode = False
+    eff_backend = backend
+    if eff_backend is None and run_query is None:
+        eff_backend = _default_backend_from_env()
+    if eff_backend is not None and type(eff_backend).__name__.startswith(
+        "OpenAIJson"
+    ):
+        json_mode = True
+
+    user_msg = _render_words_user_message(
+        agent_text, context_label=context_label, json_mode=json_mode,
+    )
+    eff_model = model or os.environ.get("GADFLY_MODEL") or DEFAULT_MODEL
+
+    if eff_backend is not None:
+        payload, error = await _evaluate_words_oai(
+            backend=eff_backend, user_message=user_msg,
+            model=eff_model, timeout_s=timeout_s,
+        )
+    else:
+        rq = run_query or _default_run_query
+        payload, error = await _evaluate_words_sdk(
+            user_message=user_msg, model=eff_model,
+            timeout_s=timeout_s, run_query=rq,
+        )
+    latency_ms = (time.perf_counter() - t0) * 1000.0
+
+    if payload is None:
+        return _conservative_words_verdict(error or "no payload", latency_ms)
+    return _build_words_verdict_from_payload(payload, latency_ms)
+
+
+def evaluate_words(
+    *,
+    agent_text: str,
+    context_label: str = "agent text",
+    model: str | None = None,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    backend: Any = None,
+    run_query: RunQuery | None = None,
+) -> WordsVerdict:
+    """Sync entry point for the hook (not inside an event loop)."""
+    try:
+        return asyncio.run(
+            evaluate_words_async(
+                agent_text=agent_text,
+                context_label=context_label,
+                model=model,
+                timeout_s=timeout_s,
+                backend=backend,
+                run_query=run_query,
+            )
+        )
+    except Exception as exc:
+        return _conservative_words_verdict(
+            f"asyncio.run failed: {exc!r}", 0.0,
+        )
+
+
+def words_question(kind: str | None) -> str:
+    """Return the canonical Socratic question for a lazy_kind. Falls
+    back to 'other' for unknown / null kinds."""
+    if kind and kind in WORDS_DRIFT_QUESTIONS:
+        return WORDS_DRIFT_QUESTIONS[kind]
+    return WORDS_DRIFT_QUESTIONS["other"]
