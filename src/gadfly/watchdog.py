@@ -34,6 +34,10 @@ from .prompts import (
     SUBMIT_VERDICT_JSON_SCHEMA,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_JOURNAL,
+    SYSTEM_PROMPT_WRONG_LEVEL,
+    SYSTEM_PROMPT_WRONG_LEVEL_JOURNAL,
+    WRONG_LEVEL_REASON,
+    WRONG_LEVEL_SUGGESTION,
     build_user_message,
 )
 from .session import SessionContext
@@ -41,9 +45,27 @@ from .verdict import Verdict
 
 
 def _select_system_prompt(use_journal: bool) -> str:
-    """Phase 2 default. `GADFLY_JOURNAL_VERDICT=0` rolls back to the
-    legacy verdict prompt (Phase 1 shadow mode)."""
-    if use_journal and os.environ.get("GADFLY_JOURNAL_VERDICT", "1") != "0":
+    """Select the verdict rubric.
+
+    `GADFLY_RUBRIC=wrong_level` switches to the Phase-3 Einstein-method
+    prompt (with journal extensions when `use_journal` is on). Otherwise
+    falls back to the Phase-2 default — symptom-fix focused.
+
+    `GADFLY_JOURNAL_VERDICT=0` rolls back to the legacy non-journal
+    prompt (Phase 1 shadow mode); honoured for both rubrics.
+    """
+    rubric = os.environ.get("GADFLY_RUBRIC", "").strip().lower()
+    journal_on = (
+        use_journal
+        and os.environ.get("GADFLY_JOURNAL_VERDICT", "1") != "0"
+    )
+    if rubric == "wrong_level":
+        return (
+            SYSTEM_PROMPT_WRONG_LEVEL_JOURNAL
+            if journal_on
+            else SYSTEM_PROMPT_WRONG_LEVEL
+        )
+    if journal_on:
         return SYSTEM_PROMPT_JOURNAL
     return SYSTEM_PROMPT
 
@@ -103,6 +125,11 @@ class EvaluationResult:
     error: str | None  # human-readable error or None on success
     user_message: str = ""  # the exact prompt we sent the model (audit log)
     system_prompt_sha: str = ""  # sha of the SYSTEM_PROMPT at evaluation time
+    # Raw model output, preserved verbatim even when the verdict layer
+    # rewrites verdict.reason/suggestion (e.g. canonical Einstein
+    # substitution under GADFLY_RUBRIC=wrong_level). Lets us inspect
+    # what the classifier actually said while iterating prompts.
+    raw_verdict_args: dict[str, Any] | None = None
 
 
 # Back-compat type alias: tests that pass `run_query=...` keep working
@@ -162,12 +189,17 @@ async def evaluate_async(
     )
     system_prompt_sha = audit_log.ensure_system_prompt(system_prompt)
 
-    def _result(verdict: Verdict, error: str | None) -> EvaluationResult:
+    def _result(
+        verdict: Verdict,
+        error: str | None,
+        raw: dict[str, Any] | None = None,
+    ) -> EvaluationResult:
         return EvaluationResult(
             verdict=verdict,
             error=error,
             user_message=user_message,
             system_prompt_sha=system_prompt_sha,
+            raw_verdict_args=raw,
         )
 
     if backend is None:
@@ -200,7 +232,23 @@ async def evaluate_async(
 
     if br.verdict_args is None:
         return _result(Verdict.silent_ok(), br.error or "no verdict")
-    return _result(Verdict.from_tool_input(br.verdict_args), None)
+    raw = dict(br.verdict_args)  # preserve verbatim model output
+    verdict = Verdict.from_tool_input(br.verdict_args)
+    # Wrong-level rubric: the model is a binary signal. Whatever it
+    # generated for reason/suggestion is discarded — flags carry the
+    # fixed Socratic question that asks the supervised (smarter) model
+    # to self-reflect on Einstein's three-level rule using context only
+    # it has. `raw` preserves the model's text for audit/iteration.
+    if (
+        os.environ.get("GADFLY_RUBRIC", "").strip().lower() == "wrong_level"
+        and verdict.professional is False
+    ):
+        verdict = Verdict(
+            professional=False,
+            reason=WRONG_LEVEL_REASON,
+            suggestion=WRONG_LEVEL_SUGGESTION,
+        )
+    return _result(verdict, None, raw=raw)
 
 
 def evaluate(

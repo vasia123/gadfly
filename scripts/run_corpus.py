@@ -191,6 +191,7 @@ async def main_async(args):
             "verdict_professional": res.verdict.professional,
             "verdict_reason": res.verdict.reason,
             "verdict_suggestion": res.verdict.suggestion,
+            "raw_verdict_args": res.raw_verdict_args,
             "original_reason": orig,
             "latency_s": round(dt, 2),
             "error": res.error,
