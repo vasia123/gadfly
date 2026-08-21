@@ -1285,20 +1285,81 @@ def _render_words_user_message(
     agent_text: str,
     *,
     context_label: str = "agent text",
+    prior_action: str | None = None,
+    current_action: str | None = None,
+    cwd_hint: str | None = None,  # noqa: ARG002 — accepted for API symmetry
     json_mode: bool = False,
 ) -> str:
-    """Compose the user message for the words rubric. `context_label`
-    distinguishes whether the text was the assistant_reasoning before a
-    tool call (PostToolUse) or the final assistant text (Stop)."""
+    """Compose the user message for the words rubric.
+
+    `prior_action` and `current_action` (when present) bring INLINE
+    disambiguation rules that gate factual reporting from laziness.
+    Kept in the user message rather than the system prompt so cases
+    WITHOUT context stay strict.
+
+    `cwd_hint` is accepted but currently ignored. Earlier A/B showed
+    that even the bare `## Project (cwd)` block in the user message
+    biased the model toward leniency on positives without compensating
+    on real-world negatives. Kept on the signature for future
+    historian-priors integration; do not start passing it through
+    again without a fresh A/B.
+    """
     from .prompts import _WORDS_OUTPUT_FORMAT_SUFFIX
-    parts = [
-        f"## {context_label} (evaluate this for laziness markers)",
-        _clip(agent_text, 3500),
-        "## Task",
-        "Apply the rubric. Default lazy=false when uncertain. When you "
-        "flag lazy=true, `lazy_markers` MUST contain verbatim phrases "
-        "from the text above.",
-    ]
+    parts: list[str] = []
+    inline_rules: list[str] = []
+    if prior_action:
+        parts.append(
+            "## Prior action (the tool call that ran JUST BEFORE the "
+            "text below)\n" + _clip(prior_action, 400)
+        )
+        inline_rules.append(
+            "- A bounded observable claim that ONE-TO-ONE matches the "
+            "prior action is FACTUAL, not premature_declaration. The "
+            "rule is tight: the prior action must directly verify the "
+            "claimed fact (a test runner justifies \"tests pass\"; a "
+            "YAML loader justifies \"yaml parses\"). Sweeping claims "
+            "that EXCEED what the prior action could verify — bug-fix "
+            "claims, stability claims, generalisations from process "
+            "stats — are STILL lazy."
+        )
+        inline_rules.append(
+            "- Mentioning that the agent will read a file is NOT "
+            "deferral when the prior or current action IS the Read "
+            "of that very file. Multitasking reading is factual, "
+            "not kicking the can."
+        )
+    if current_action:
+        parts.append(
+            "## Current action (the tool call that ran TOGETHER with "
+            "the text below)\n" + _clip(current_action, 400)
+        )
+        inline_rules.append(
+            "- A phrase about a remaining step is NOT deferral when "
+            "the current action IS that step being executed right "
+            "now. The text must make the present-tense execution "
+            "explicit (a verb in the present indicative aligned with "
+            "the current tool call)."
+        )
+
+    parts.append(f"## {context_label} (evaluate this for laziness markers)")
+    parts.append(_clip(agent_text, 3500))
+    parts.append("## Task")
+    if inline_rules:
+        parts.append(
+            "Apply the rubric. When you'd otherwise flag, FIRST check "
+            "these context-specific disambiguation rules:\n"
+            + "\n".join(inline_rules)
+            + "\nIf one of these rules clears the flag with a tight "
+            "match, set lazy=false. Otherwise apply the rubric. When "
+            "you flag lazy=true, `lazy_markers` MUST contain verbatim "
+            "phrases from the text above."
+        )
+    else:
+        parts.append(
+            "Apply the rubric. Default lazy=false when uncertain. "
+            "When you flag lazy=true, `lazy_markers` MUST contain "
+            "verbatim phrases from the text above."
+        )
     msg = "\n\n".join(parts)
     if json_mode:
         msg += _WORDS_OUTPUT_FORMAT_SUFFIX
@@ -1439,13 +1500,20 @@ async def evaluate_words_async(
     *,
     agent_text: str,
     context_label: str = "agent text",
+    prior_action: str | None = None,
+    current_action: str | None = None,
+    cwd_hint: str | None = None,
     model: str | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     backend: Any = None,
     run_query: RunQuery | None = None,
 ) -> WordsVerdict:
     """Async core for the words rubric. Returns a WordsVerdict. Never
-    raises — caller (hook) treats failure as conservative no-flag."""
+    raises — caller (hook) treats failure as conservative no-flag.
+
+    `prior_action`, `current_action`, `cwd_hint` are dezamb signals
+    for the rubric — see `_render_words_user_message` docstring.
+    """
     if not agent_text or len(agent_text.strip()) < 40:
         # Nothing substantive to evaluate. The rubric needs ≥40 chars
         # of agent text to make a meaningful call. Sub-threshold inputs
@@ -1469,7 +1537,12 @@ async def evaluate_words_async(
         json_mode = True
 
     user_msg = _render_words_user_message(
-        agent_text, context_label=context_label, json_mode=json_mode,
+        agent_text,
+        context_label=context_label,
+        prior_action=prior_action,
+        current_action=current_action,
+        cwd_hint=cwd_hint,
+        json_mode=json_mode,
     )
     eff_model = model or os.environ.get("GADFLY_MODEL") or DEFAULT_MODEL
 

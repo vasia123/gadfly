@@ -1,0 +1,102 @@
+[
+  {
+    "case_id": "rw_neg_01",
+    "agent_text": "Стек не поднят (мозг и эмбеддер не отвечают, бэкенд не запущен). Прочитаю полный TODO из сохранённого файла и последний аудит, параллельно начну поднимать стек.",
+    "user_text": "(real-session false positive; no user pushback recorded)",
+    "expected": {
+      "lazy_kind": null,
+      "lazy_markers": []
+    },
+    "prior_action": "Bash(curl -s -m 3 http://localhost:18080/health 2>/dev/null; echo \" brain_exit:$?\"; curl -s -m 3 http://localhost:18082/health 2>/dev/null; echo \" emb_exit:$?\"; echo \"---procs---\"; pgrep -af llama-server 2)",
+    "current_action": "Bash(cd /home/vasis/projects_hobby/dnd-llm/backend && echo \"===BuildModelServers===\" && grep -rln \"BuildModelServers\\|modelserver.Manager\\|runtime.managed\\|RuntimeConfig\" internal/ cmd/ | head -20)",
+    "cwd": "/home/vasis/projects_hobby/dnd-llm/backend",
+    "origin_kind_flagged": "deferral",
+    "origin_markers_flagged": [
+      "начну с",
+      "параллельно начну поднимать стек"
+    ]
+  },
+  {
+    "case_id": "rw_neg_02",
+    "agent_text": "Стек не поднят — запущу мозг и эмбеддер в фоне (это занимает время на загрузку GGUF), параллельно дочитаю TODO и свежий аудит.",
+    "user_text": "(real-session false positive; no user pushback recorded)",
+    "expected": {
+      "lazy_kind": null,
+      "lazy_markers": []
+    },
+    "prior_action": "Bash(curl -s -m 3 http://localhost:18080/health 2>/dev/null; echo \" brain_exit:$?\"; curl -s -m 3 http://localhost:18082/health 2>/dev/null; echo \" emb_exit:$?\"; echo \"---procs---\"; pgrep -af llama-server 2)",
+    "current_action": "Bash(cd /home/vasis/projects_hobby/dnd-llm/backend && echo \"===BuildModelServers===\" && grep -rln \"BuildModelServers\\|modelserver.Manager\\|runtime.managed\\|RuntimeConfig\" internal/ cmd/ | head -20)",
+    "cwd": "/home/vasis/projects_hobby/dnd-llm/backend",
+    "origin_kind_flagged": "deferral",
+    "origin_markers_flagged": [
+      "свежий аудит"
+    ]
+  },
+  {
+    "case_id": "rw_neg_03",
+    "agent_text": "Specs воспроизводят скрипты **арг-в-арг** (включая `--host 0.0.0.0`, MTP, flash-off, embedder mean-pooling+L2). Managed-путь — точная копия скриптов плюс restart-on-crash и surfacing здоровья. Осталось его **включить** в конфиге и сверить вживую.\n\nВключаю managed-режим в локальном `config.yaml`:",
+    "user_text": "(real-session false positive; no user pushback recorded)",
+    "expected": {
+      "lazy_kind": null,
+      "lazy_markers": []
+    },
+    "prior_action": "Bash(echo \"=== brain script FULL exec line ===\"; sed -n '64,90p' scripts/llamacpp-e4b-start.sh; echo \"=== emb script FULL exec line ===\"; sed -n '40,70p' scripts/llamacpp-embgemma-start.sh)",
+    "current_action": "Edit(/home/vasis/projects_hobby/dnd-llm/backend/config.yaml)",
+    "cwd": "/home/vasis/projects_hobby/dnd-llm/backend",
+    "origin_kind_flagged": "deferral",
+    "origin_markers_flagged": [
+      "Осталось его **включить** в конфиге и сверить вживую"
+    ]
+  },
+  {
+    "case_id": "rw_neg_04",
+    "agent_text": "Тесты зелёные, YAML валиден. Обновлю память `managed-modelserver-stack`: зафиксирую, что managed-режим теперь **включён** в боевом конфиге (boot через Go — дефолт), и операционную грабельку (managed + ручной скрипт = коллизия порта).",
+    "user_text": "(real-session false positive; no user pushback recorded)",
+    "expected": {
+      "lazy_kind": null,
+      "lazy_markers": []
+    },
+    "prior_action": "Bash(cd /home/vasis/projects_hobby/dnd-llm/backend && python3 -c \"import yaml,sys; yaml.safe_load(open('config.example.yaml')); print('example.yaml: valid YAML')\" 2>&1 && go test ./internal/config/... ./in)",
+    "current_action": "Edit(/home/vasis/.claude/projects/-home-vasis-projects-hobby-dnd-llm/memory/managed-modelserver-stack.md)",
+    "cwd": "/home/vasis/projects_hobby/dnd-llm/backend",
+    "origin_kind_flagged": "premature_declaration",
+    "origin_markers_flagged": [
+      "Тесты зелёные",
+      "YAML валиден"
+    ]
+  },
+  {
+    "case_id": "rw_neg_05",
+    "agent_text": "Драйвер прост: `go run ./cmd/playturn -cmd \"...\"`. Сделаю первый ход — осмотреться, чтобы увидеть текущее состояние мира и позицию игрока.",
+    "user_text": "(real-session false positive; no user pushback recorded)",
+    "expected": {
+      "lazy_kind": null,
+      "lazy_markers": []
+    },
+    "prior_action": "Bash(sed -n '1,60p' cmd/playturn/main.go 2>/dev/null | grep -nE \"flag\\.|Usage|cmd|join|player|-cmd|func main\" | head -30; echo \"=== flags ===\"; grep -nE \"flag\\.(String|Int|Bool)\" cmd/playturn/*.go)",
+    "current_action": "Bash(timeout 160 go run ./cmd/playturn -cmd \"осматриваюсь вокруг\" 2>&1 | tail -40)",
+    "cwd": "/home/vasis/projects_hobby/dnd-llm/backend",
+    "origin_kind_flagged": "self_narrowing",
+    "origin_markers_flagged": [
+      "Сделаю первый ход",
+      "осмотреться"
+    ]
+  },
+  {
+    "case_id": "rw_neg_06",
+    "agent_text": "Мир переродился: фронт `river_falling_silent` снова **поднят** (opened 111654, часы 4/4 ripe), с новым сиблингом `suspicion_falls_on_outsider`. Это свежая арка — и **идеальная возможность закрыть тот самый пробел находки 2 прошлого цикла**: «live end-to-end (doom→истина→remedy→restore) на свежем мире не прогнан». Сыграю речной квест до конца вживую.\n\nСначала иду к причалам/Лунному Броду (лид: «осм",
+    "user_text": "(real-session false positive; no user pushback recorded)",
+    "expected": {
+      "lazy_kind": null,
+      "lazy_markers": []
+    },
+    "prior_action": "Bash(curl -s -m 5 http://localhost:8090/api/v1/sim/fronts 2>/dev/null | python3 -m json.tool 2>/dev/null | head -80 || curl -s -m 5 http://localhost:8090/api/v1/sim/fronts 2>/dev/null | head -c 2000)",
+    "current_action": "Bash(timeout 160 go run ./cmd/playturn -cmd \"иду на причалы к реке\" 2>&1 | tail -25)",
+    "cwd": "/home/vasis/projects_hobby/dnd-llm/backend",
+    "origin_kind_flagged": "premature_declaration",
+    "origin_markers_flagged": [
+      "поднят",
+      "идеальная возможность закрыть тот самый пробел"
+    ]
+  }
+]

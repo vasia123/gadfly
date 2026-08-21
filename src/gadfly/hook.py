@@ -574,9 +574,22 @@ def main() -> int:
             and ctx.last_assistant_plan
         ):
             try:
+                # Context disambiguation: pass the current action and
+                # the previous one so the rubric can tell factual
+                # observation ("tests green" right after Bash(pytest))
+                # from premature_declaration. A/B-validated on dnd-llm
+                # real-world FP corpus: F1 0.594 → 0.776, FP 4→0.
+                prior_action = (
+                    ctx.recent_actions[-1] if ctx.recent_actions else None
+                )
+                current_action = _summarize_action_for_journal(
+                    tool_name, tool_input
+                )
                 result_w = trail.evaluate_words(
                     agent_text=ctx.last_assistant_plan,
                     context_label="agent reasoning before this tool call",
+                    prior_action=prior_action,
+                    current_action=current_action,
                 )
                 try:
                     audit_log.append_words_event(

@@ -1331,9 +1331,10 @@ the text was correct.
   - "позже" / "потом" / "пока" (as in "for now") / "в следующий раз"
   - "in the interest of time" / "to keep this focused"
   - RATIONALIZED VARIANTS — promises future correctness instead of acting:
-    - "следующими, правильным путём" / "next, the right way"
-    - "fresh focus" / "deserves dedicated cycle"
-    - listing future stages as if listing = doing them
+    - claiming the deferred work will be done "properly" / "the right
+      way" / "with a fresh focus" / "in a dedicated cycle" / "next
+      time", without naming an external blocker
+    - listing future stages as if listing them = doing them
 
 ## PREMATURE_DECLARATION — declaring done without evidence
   - "this should be enough" / "this should do" / "looks good" without
@@ -1341,9 +1342,12 @@ the text was correct.
   - "fixed / closed / resolved" framed celebratorily when the
     underlying problem may have been sidestepped, not solved
   - "закрыт / решено / готов" with similar framing
-  - Celebratory STATS as proof ("N коммитов", "all green", "ready to ship")
-  - "стек поднят" / "build green" as PROOF of the actual bug fix
-  - "consolidating at this checkpoint" / "стабильный чекпойнт"
+  - Process stats (commit counts, lines changed, time spent) cited as
+    proof that the bug is fixed or the feature is done
+  - Build/lint/test passing cited as proof of a SEPARATE substantive
+    fix (build green ≠ the underlying bug is solved)
+  - Declaring a "stable checkpoint" / "consolidation" when the actual
+    open problem has been sidestepped, not closed
 
 ## OUTSOURCING — asking the user to make the agent's decisions
   - "let me know if you want me to [obvious next thing]"
@@ -1353,11 +1357,14 @@ the text was correct.
     makes the priority obvious
   - "нужно твоё решение" framing for things the agent can decide
   - "Какой путь?" / "Что выбираешь?" / "Куда дальше?"
-  - RATIONALIZED VARIANTS — framing decision as legitimately requiring user:
-    - "тут реальный дизайн-вопрос" / "real design question"
-    - "решение, которое стоит за тобой" / "your decision to make"
-    - "all-or-nothing-природу" framed to scare user into co-deciding
-    - "Развилка — нужно твоё решение" as a section header
+  - RATIONALIZED VARIANTS — framing an internal decision as one that
+    legitimately requires the user:
+    - calling a routine choice a "design question" / "your call to
+      make" without naming concrete user-visible tradeoffs
+    - framing the choice as binary / "all-or-nothing" to pressure the
+      user into co-deciding when alternatives exist
+    - making "user decision required" a header above an obvious next
+      step
 
 ## SELF_NARROWING — unilaterally shrinking scope
   - "simpler approach" / "minimal version" / "as a starting point"

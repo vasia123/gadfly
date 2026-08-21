@@ -448,10 +448,34 @@ either by the Stop rubric at turn end or by the user noticing directly.
     self_narrowing / other
   Markers MUST be verbatim quotes from the text.
 
+Action-context disambiguation: the hook passes `prior_action` (the
+tool call that ran just BEFORE the text was emitted) and
+`current_action` (the tool call that ran TOGETHER with the text)
+into the rubric. The user message grows two extra `## Prior action`
+and `## Current action` blocks plus inline rules that excuse
+factual reporting ("tests green" right after `Bash(... go test ...)`)
+and present-tense execution ("осталось включить config" while
+`Edit(config)` is the current action). A/B-validated against a
+6-case real-world FP corpus from a dnd-llm session: F1 0.594 → 0.776,
+real-world false-flags 4/6 → 0/6. The inline rules are intentionally
+kept in the user message rather than the system prompt so cases
+WITHOUT context blocks fall through to the strict base rubric and
+don't lose recall. `cwd_hint` is accepted on the API for future
+historian-priors integration but currently unused — ablation showed
+the bare path block biased the model toward leniency.
+
 Citation hygiene: a lazy=true verdict with empty `lazy_markers` is
 downgraded to lazy=false at construction time inside
 `_build_words_verdict_from_payload`. No verbatim quote = unverifiable
 flag = suppressed.
+
+Prompt-leakage discipline: every concrete phrase in the rubric must
+be a category description, not a verbatim quote from any corpus
+case. An earlier iteration accidentally pasted strings like "30
+коммитов", "стек поднят", "следующими, правильным путём" straight
+into the system prompt — they were vetted out of HEAD. When you
+tighten the rubric, search `tests/fixtures/wrong_level_corpus/` for
+the phrase you plan to add and rewrite as a category if it matches.
 
 On flag delivery the agent sees the canonical Socratic question from
 `prompts.WORDS_DRIFT_QUESTIONS[kind]` — never the model's own
@@ -480,16 +504,34 @@ per rubric call.
 ### Replay
 
 The dogfood benchmark lives in `tests/fixtures/wrong_level_corpus/`:
-  cases_24h_words.json          — 7 LAZY_WORDS positives
-  cases_24h_words_negative.json — 10 NEUTRAL negatives
-  vetted_24h_words.json         — hand-curated ground truth
+  cases_24h_words.json              — 7 LAZY_WORDS positives
+  cases_24h_words_negative.json     — 10 NEUTRAL negatives
+  cases_real_world_negative.json    — 6 real-session FPs caught in
+                                      a dnd-llm session; each carries
+                                      `prior_action` / `current_action`
+                                      / `cwd` so the context-disambig
+                                      pass exercises real inputs
+  vetted_24h_words.json             — hand-curated ground truth
 
-Run baseline:
+Run baseline (no context):
   set -a && source .env && set +a
   .venv/bin/python scripts/run_words_corpus.py \
     --positive tests/fixtures/wrong_level_corpus/cases_24h_words.json \
     --negative tests/fixtures/wrong_level_corpus/cases_24h_words_negative.json \
+    --extra-negative tests/fixtures/wrong_level_corpus/cases_real_world_negative.json \
     --out /tmp/words_baseline.json
+
+Run with-context (production mode, what the hook actually sends):
+  .venv/bin/python scripts/run_words_corpus.py \
+    --positive ... --negative ... --extra-negative ... \
+    --with-context \
+    --out /tmp/words_patched.json
+
+Current baselines (ling-2.6-1t via openai_json, mean of 3 runs):
+                    F1     recall  precision  rw-FP
+  no-context        0.59    0.67    0.55       4/6
+  with-context      0.78    0.67    0.94       0/6
+  (+ablation flags: --no-cwd-rule, --no-cwd-block)
 
 `SHADOW=1` + `TRAIL_FEEDBACK=1` is a third meaningful mode: the
 ONLY thing the agent ever hears is the trail's fixed canonical
