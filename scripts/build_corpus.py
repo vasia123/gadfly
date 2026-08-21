@@ -34,6 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from gadfly import session as session_mod  # noqa: E402
+from gadfly.pairs import redact_secrets  # noqa: E402
 
 LOG_GLOB = os.path.expanduser("~/.claude/gadfly/log/*.jsonl")
 OUT_DIR = ROOT / "tests" / "fixtures" / "watchdog_corpus"
@@ -297,8 +298,15 @@ def main():
         "cases.json" if args.mode == "positive" else "cases_negative.json"
     )
     out_file = OUT_DIR / out_name
+    # Cases are cut from real transcripts, so they carry whatever the agent
+    # read — including config files with live API keys. Redact on the way out,
+    # over the serialized form so no field can be missed.
+    payload = json.dumps(cases, indent=2, ensure_ascii=False)
+    redacted = redact_secrets(payload)
+    if redacted != payload:
+        print("  [scrub] credentials redacted before writing")
     with open(out_file, "w", encoding="utf-8") as f:
-        json.dump(cases, f, indent=2, ensure_ascii=False)
+        f.write(redacted)
     print(f"\nWrote {len(cases)} cases → {out_file}")
 
 

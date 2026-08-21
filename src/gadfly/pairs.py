@@ -143,3 +143,44 @@ def extract_pairs(entries: list[dict[str, Any]]) -> list[Pair]:
             last_assistant_text = None
 
     return pairs
+
+# ── secret redaction ───────────────────────────────────────────────────────
+# Corpus fixtures are built from REAL transcripts, and a transcript contains
+# whatever the agent read: config files, `env` output, curl commands. That is
+# how a live OpenRouter key and a Fireworks key ended up committed to this
+# repo (2026-08-21). Anything derived from a transcript must pass through
+# here before it is written to disk.
+#
+# Two nets. Known provider prefixes catch the common formats outright. The
+# shape rule catches the rest: a key/token/secret assignment whose value is a
+# long literal mixing letters and digits, with no spaces, dots or slashes —
+# which is what excludes `password: postgres`, `token = request.token` and
+# other ordinary code.
+_SECRET_PREFIX_RE = re.compile(
+    r"\b(fw_|gsk_|sk-ant-|sk-or-v1-|sk-proj-|AIza|hf_|ghp_|gho_|ghs_"
+    r"|github_pat_|xox[bpsa]-|AKIA|glpat-)[A-Za-z0-9_\-]{16,}"
+)
+_SECRET_ASSIGN_RE = re.compile(
+    r"((?:api_?key|apikey|token|secret|password|credential)[A-Za-z_]{0,20}"
+    r"[\\\"']*\s*[:=]\s*\\?[\"'])([^\"'\\\s]{20,})",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_secret(value: str) -> bool:
+    if "REDACTED" in value.upper():
+        return False
+    if any(ch in value for ch in "./\\("):        # paths and code, not secrets
+        return False
+    return any(c.isdigit() for c in value) and any(c.isalpha() for c in value)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace anything that looks like a live credential with a placeholder."""
+    if not text:
+        return text
+    text = _SECRET_PREFIX_RE.sub(lambda m: m.group(1) + "REDACTED", text)
+    return _SECRET_ASSIGN_RE.sub(
+        lambda m: m.group(1) + ("REDACTED" if _looks_like_secret(m.group(2)) else m.group(2)),
+        text,
+    )
